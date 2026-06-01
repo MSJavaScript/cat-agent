@@ -1,3 +1,3 @@
-# catCompTools
+# cat-agent
 
-A series of tools for theoretical catalytic computation.
+An agent for computational catalysis
