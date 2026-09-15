@@ -1,0 +1,22 @@
+{
+  "db_path": "demo.db",
+  "callback_url": "http://127.0.0.1:9001/callback",
+  "front_end_url": "http://127.0.0.1:9001/stream",
+  "poll_interval": 3,
+  "retry_job_download": [2, 4],
+  "retry_callback": [2, 4],
+  "n_retry_get_status": 3,
+  "n_retry_job_submit": 1,
+  "providers": {
+    "local": {
+      "type": "local",
+      "processing_units": ["cpu"],
+      "job_envs": {
+        "default": {
+          "softwares": ["bash", "coreutils"],
+          "initialize_command": []
+        }
+      }
+    }
+  }
+}
