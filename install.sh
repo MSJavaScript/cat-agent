@@ -10,11 +10,12 @@
 #
 # After installation the `catagent` command is available:
 #
-#   catagent cli    --dotenv /path/to/.env --db ./catagent.db
-#   catagent server --dotenv /path/to/.env --db ./catagent.db --port 5600
+#   catagent cli        --dotenv /path/to/.env --db ./catagent.db
+#   catagent server     --dotenv /path/to/.env --db ./catagent.db --port 5600
+#   catagent jobmanager --setting /path/to/jobmanager_config.json --port 8000
 #
-# The skills directory ships with the package; --skill-index-json is optional
-# and can be overridden with CATAGENT_SKILL_INDEX.
+# The skills directory ships inside the catagent package; --skill-index-json is
+# optional and can be overridden with CATAGENT_SKILL_INDEX.
 #
 set -euo pipefail
 
@@ -102,6 +103,49 @@ fi
 echo "Installing cat-agent from $REPO_ROOT"
 echo "  interpreter: $("$PYTHON" -c 'import sys; print(sys.executable)')"
 
+# Older cat-agent wheels installed skills/jobmanager/tools/libs as separate
+# top-level packages.  They are now part of catagent, and leftovers can shadow
+# or confuse imports.  Remove a directory only when it carries a marker file
+# that identifies it as this project's old layout.
+"$PYTHON" - <<'PY' || true
+import shutil
+import site
+import sysconfig
+from pathlib import Path
+
+roots = {sysconfig.get_paths()["purelib"]}
+try:
+    roots.add(site.getusersitepackages())
+except Exception:
+    pass
+
+markers = {
+    "jobmanager": ("server.py", "JobManager"),
+    "skills": ("skill_index.json", None),
+    "tools": ("core.py", "ToolOutput"),
+    "libs": ("nebkit", None),
+}
+
+for root in sorted(roots):
+    base = Path(root)
+    if not base.is_dir():
+        continue
+    for name, (marker, needle) in markers.items():
+        target = base / name
+        probe = target / marker
+        if not probe.exists():
+            continue
+        if needle is not None:
+            try:
+                text = probe.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if needle not in text:
+                continue
+        shutil.rmtree(target)
+        print(f"  removed stale top-level package: {target}")
+PY
+
 TARGET=(.)
 if [[ $EDITABLE -eq 1 ]]; then
     TARGET=(-e .)
@@ -154,10 +198,19 @@ fi
 SKILL_INDEX="$(cd /tmp && env -u PYTHONPATH -u CATAGENT_SKILL_INDEX "$PYTHON" -c \
     'from catagent._paths import default_skill_index; print(default_skill_index())')"
 if [[ -z "$SKILL_INDEX" ]]; then
-    echo "error: the installed package does not contain skills/skill_index.json" >&2
+    echo "error: the installed package does not contain catagent/skills/skill_index.json" >&2
     exit 1
 fi
 echo "skill index:     $SKILL_INDEX"
+
+# ``catagent --help`` must not need the model stack, so this also checks that
+# the dependency-light entry point was installed correctly.
+if [[ -n "$COMMAND" ]]; then
+    "$COMMAND" --help >/dev/null 2>&1 || {
+        echo "error: installed catagent command is not runnable" >&2
+        exit 1
+    }
+fi
 
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
@@ -173,9 +226,10 @@ cat <<'EOF'
 Installed. Next steps:
 
     catagent --help
-    catagent cli    --dotenv /path/to/.env --db ./catagent.db
-    catagent server --dotenv /path/to/.env --db ./catagent.db --port 5600
+    catagent cli        --dotenv /path/to/.env --db ./catagent.db
+    catagent server     --dotenv /path/to/.env --db ./catagent.db --port 5600
+    catagent jobmanager --setting /path/to/jobmanager_config.json --port 8000
 
 The jobmanager configuration is not installed: provide your own file with
-`python -m jobmanager.server --setting /path/to/jobmanager_config.json`.
+`catagent jobmanager --setting /path/to/jobmanager_config.json`.
 EOF

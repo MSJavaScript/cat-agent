@@ -22,7 +22,7 @@ def load_env() -> None:
     candidates = [
         Path("/home/luandong/bin/.env"),
         REPO_ROOT / ".env",
-        REPO_ROOT / "jobmanager" / ".env",
+        REPO_ROOT / "catagent" / "jobmanager" / ".env",
     ]
     for path in candidates:
         if path.is_file():

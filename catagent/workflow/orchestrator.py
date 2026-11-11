@@ -11,7 +11,7 @@ from catagent.stepnode.models import InterruptState
 
 import httpx
 from typing import List, Annotated, Dict, Literal, Callable, Any 
-from tools.other.util_tools import execute_shell, edit_file, read_file
+from catagent.tools.other.util_tools import execute_shell, edit_file, read_file
 from .skill_tool import init_skill_tools
 from .planner_tool import init_planner_tool
 from .job_tool import init_job_manager_tools

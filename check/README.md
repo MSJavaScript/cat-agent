@@ -44,7 +44,7 @@ existing file among:
 
 1. `/home/luandong/bin/.env`
 2. `<repo>/.env`
-3. `<repo>/jobmanager/.env`
+3. `<repo>/catagent/jobmanager/.env`
 
 It expects:
 
@@ -75,7 +75,7 @@ If something is using them, stop it or edit the constants
 
 ### `mock_skills/mock_compute/`
 
-Layout is the same as a real skill (compare `skills/dpa4/`):
+Layout is the same as a real skill (compare `catagent/skills/dpa4/`):
 
 ```text
 check/mock_skills/mock_compute/
@@ -118,7 +118,7 @@ The fake energies are deterministic: sample A ends lower than sample B
 
 ### Job environment
 
-`jobmanager/jobmanager_config.json` contains a provider named `local-mock` with
+`catagent/jobmanager/jobmanager_config.json` contains a provider named `local-mock` with
 one job environment, `mock-compute`.  Its `initialize_command` puts
 `check/mock_software/bin` on `PATH`; `check/test_agent_e2e.py` also starts the
 jobmanager with that directory on `PATH`.  The local provider applies each
@@ -199,8 +199,8 @@ stream and an `httpx.MockTransport`; no jobmanager process is started.
 python -m check.test_app_skill_init
 ```
 
-This checks that `skills/skill_index.json` loads, that stale absolute skill
-paths are remapped to the local `skills/<name>/` tree, that the compiled graph's
+This checks that `catagent/skills/skill_index.json` loads, that stale absolute skill
+paths are remapped to the local `catagent/skills/<name>/` tree, that the compiled graph's
 `init_skills` node seeds `loaded_skills`, and that skill-tool `ToolMessage`s are
 truncated to 100 characters in streamed payloads without changing the original
 message.
@@ -343,7 +343,7 @@ bug shared one `scp.SCPClient` between two concurrent slurm downloads, which
 truncated one archive and put Cu results into the Si workdir.
 
 The test writes a temporary jobmanager config derived from
-`jobmanager/jobmanager_config.json`: only the `bohr` and `slurm-1` providers,
+`catagent/jobmanager/jobmanager_config.json`: only the `bohr` and `slurm-1` providers,
 a temporary DB, the test callback URL, and a shorter `poll_interval`.  The
 repository config is never modified.  `run.sh` and `job_description.json` are
 pre-created so the test is deterministic; pass `--agent-prepares-files` to let

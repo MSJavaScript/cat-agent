@@ -12,7 +12,7 @@ from .workflow.orchestrator import create_orchestrator_agent, OrchestratorAgentS
 from .workflow.router import orchestrator_request_queue, router
 from .stepnode.stepnode import create_stepnode_agent, InterruptState
 
-import logging, logging.handlers, queue
+import logging
 from typing import Literal, TypedDict, Dict, Any
 import os, httpx, asyncio
 
@@ -164,7 +164,7 @@ def create_catagent(model:BaseChatModel,
         return list(interrupts)
 
     async def step_node(state:StepNodeInput, config:RunnableConfig):
-        logger.info(f"Enter step_node: step_id = {state['step_id']}, workdir = {state['workdir']}\ninterrupt_resume = {state['interrupt_resume']}.")
+        logger.info(f"Enter step_node: step_id = {state.get('step_id')}, workdir = {state.get('workdir')}\ninterrupt_resume = {state.get('interrupt_resume')}.")
 
         writer = get_stream_writer()
         thread_id = config["configurable"]["thread_id"]
@@ -227,7 +227,10 @@ def create_catagent(model:BaseChatModel,
     
 
     async def orchestrator_node(state:OrchestratorAgentState, config:RunnableConfig):
-        logger.info(f"Enter orchestrator_node. last messages = {state['messages'][-1].content}\ninterrupt_resume = {state['interrupt_resume']}")
+        # A resume enters this node through Send(..., {"interrupt_resume": ...}),
+        # so the outer state (messages/steps) is not part of ``state`` here.
+        last_message = state["messages"][-1].content if state.get("messages") else "<none>"
+        logger.info(f"Enter orchestrator_node. last messages = {last_message}\ninterrupt_resume = {state.get('interrupt_resume')}")
 
         writer = get_stream_writer()
         # 这里假设它必须提供thread_id

@@ -29,14 +29,14 @@ from pathlib import Path
 
 import httpx
 
-from jobmanager.base import BaseProvider
-from jobmanager.db import JobDB
-from jobmanager.manager import JobManager
-from jobmanager.models import (
+from catagent.jobmanager.base import BaseProvider
+from catagent.jobmanager.db import JobDB
+from catagent.jobmanager.manager import JobManager
+from catagent.jobmanager.models import (
     FinalizeState, JobRecord, JobRequest, JobSetting, JobStatus,
     SubmissionState, SubJobRecord, _now,
 )
-from jobmanager.providers.local import LocalProvider
+from catagent.jobmanager.providers.local import LocalProvider
 
 
 def check(condition: bool, message: str) -> None:
@@ -309,7 +309,7 @@ async def test_explicit_retry_bumps_attempt(tmp: Path) -> None:
     async def fake_agent(**kwargs):
         return {"preprocessing_output": {"batch_job": False}}
 
-    import jobmanager.manager as manager_module
+    import catagent.jobmanager.manager as manager_module
     original = manager_module.run_job_agent
     manager_module.run_job_agent = fake_agent
     try:
@@ -350,7 +350,7 @@ async def test_missing_result_files_are_an_error(tmp: Path) -> None:
     async def fake_agent(**kwargs):
         return {"checking_output": {"job_result_status": "Success"}}
 
-    import jobmanager.manager as manager_module
+    import catagent.jobmanager.manager as manager_module
     original = manager_module.run_job_agent
     manager_module.run_job_agent = fake_agent
     try:
@@ -482,7 +482,7 @@ async def test_callback_404_is_not_delivered(tmp: Path) -> None:
 
         async def fake_agent(**kwargs):
             return {"checking_output": {"job_result_status": "Success"}}
-        import jobmanager.manager as manager_module
+        import catagent.jobmanager.manager as manager_module
         original = manager_module.run_job_agent
         manager_module.run_job_agent = fake_agent
         try:
@@ -513,7 +513,7 @@ async def test_missing_agent_output_fails_closed(tmp: Path) -> None:
     async def fake_agent(**kwargs):
         return {}
 
-    import jobmanager.manager as manager_module
+    import catagent.jobmanager.manager as manager_module
     original = manager_module.run_job_agent
     manager_module.run_job_agent = fake_agent
     try:
@@ -697,7 +697,7 @@ async def test_orchestrator_locks_are_per_thread() -> None:
 
 async def test_slurm_remote_path_quoting() -> None:
     """A leading ``~`` in slurm's remote_root must stay shell-expandable."""
-    from jobmanager.providers.slurm import remote_shell_path
+    from catagent.jobmanager.providers.slurm import remote_shell_path
 
     quoted = remote_shell_path("~/jobs/abc")
     check(quoted == '"$HOME"/jobs/abc',

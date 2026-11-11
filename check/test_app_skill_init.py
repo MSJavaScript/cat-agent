@@ -28,7 +28,7 @@ from catagent.app.skills import load_skill_index
 from check.scripted_model import ScriptedModel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SKILL_INDEX = REPO_ROOT / "skills" / "skill_index.json"
+SKILL_INDEX = REPO_ROOT / "catagent" / "skills" / "skill_index.json"
 
 
 def _skill(name: str) -> Dict[str, Any]:
@@ -53,7 +53,7 @@ def _skill(name: str) -> Dict[str, Any]:
 
 def test_repository_index() -> None:
     skills = load_skill_index(str(SKILL_INDEX))
-    assert skills, "skills/skill_index.json must not be empty"
+    assert skills, "catagent/skills/skill_index.json must not be empty"
     for metadata in skills.values():
         assert Path(metadata["path"]).is_file(), metadata["path"]
         artifacts = (metadata["references"] or []) + (metadata["scripts"] or [])
@@ -72,6 +72,30 @@ def test_moved_checkout() -> None:
         (skill_dir / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
         index = root / "skills" / "skill_index.json"
         index.write_text(json.dumps([_skill("demo")]), encoding="utf-8")
+
+        skills = load_skill_index(str(index))
+
+    metadata = skills["demo"]
+    assert metadata["path"] == str(skill_dir / "skill.md")
+    assert metadata["references"][0]["path"] == str(skill_dir / "references" / "ref.md")
+    assert metadata["scripts"][0]["path"] == str(skill_dir / "scripts" / "run.py")
+
+
+def test_relative_index() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        skill_dir = root / "skills" / "demo"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "skill.md").write_text("# demo\n", encoding="utf-8")
+        (skill_dir / "references" / "ref.md").write_text("ref\n", encoding="utf-8")
+        (skill_dir / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+        entry = _skill("demo")
+        entry["path"] = "demo/skill.md"
+        entry["references"][0]["path"] = "demo/references/ref.md"
+        entry["scripts"][0]["path"] = "demo/scripts/run.py"
+        index = root / "skills" / "skill_index.json"
+        index.write_text(json.dumps([entry]), encoding="utf-8")
 
         skills = load_skill_index(str(index))
 
@@ -181,6 +205,7 @@ def test_agent_logging() -> None:
 def main() -> None:
     test_repository_index()
     test_moved_checkout()
+    test_relative_index()
     test_payload_limit()
     asyncio.run(_test_graph_seeding())
     test_cli_option_default()

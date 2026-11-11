@@ -244,7 +244,7 @@ def start_jobmanager(log_path: Path) -> subprocess.Popen:
             pass
     log_file = open(log_path, "w", encoding="utf-8")
     return subprocess.Popen(
-        [sys.executable, "-m", "jobmanager.server",
+        [sys.executable, "-m", "catagent.jobmanager.server",
          "--setting", str(TEST_CONFIG),
          "--host", "127.0.0.1",
          "--port", str(JOB_MANAGER_PORT),

@@ -44,8 +44,8 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         "--skill_index_json",
         dest="skill_index_json",
         default=None,
-        help="Path to the skill index JSON file. Default: the skills/ directory "
-        f"shipped with cat-agent (override with {SKILLS_ENV}).",
+        help="Path to the skill index JSON file. Default: the skills "
+        f"shipped inside the catagent package (override with {SKILLS_ENV}).",
     )
     parser.add_argument(
         "--log",
@@ -94,6 +94,36 @@ def _add_server_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_jobmanager_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--setting",
+        required=True,
+        help="Path to the jobmanager setting JSON file.",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Bind port (default: 8000).",
+    )
+    parser.add_argument(
+        "--log",
+        default="jobmanager.log",
+        help="Path to the jobmanager log file (default: jobmanager.log).",
+    )
+    parser.add_argument(
+        "--level",
+        default="info",
+        choices=["info", "debug"],
+        help="Log level (default: info).",
+    )
+
+
 def _build_parser(prog: str = "python -m catagent.app") -> argparse.ArgumentParser:
     """Legacy flat parser used by ``python -m catagent.app``."""
     parser = argparse.ArgumentParser(
@@ -112,7 +142,7 @@ def _build_parser(prog: str = "python -m catagent.app") -> argparse.ArgumentPars
 
 
 def _build_command_parser(prog: str = "catagent") -> argparse.ArgumentParser:
-    """The installed ``catagent cli`` / ``catagent server`` command."""
+    """The installed ``catagent cli`` / ``server`` / ``jobmanager`` command."""
     parser = argparse.ArgumentParser(
         prog=prog,
         description="cat-agent: computational catalysis agent.",
@@ -125,7 +155,7 @@ def _build_command_parser(prog: str = "catagent") -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{cli,server}",
+        metavar="{cli,server,jobmanager}",
     )
 
     cli = subparsers.add_parser(
@@ -143,6 +173,13 @@ def _build_command_parser(prog: str = "catagent") -> argparse.ArgumentParser:
     )
     _add_common_args(server)
     _add_server_args(server)
+
+    jobmanager = subparsers.add_parser(
+        "jobmanager",
+        help="Run the job submission service.",
+        description="Run the job submission service (FastAPI backend).",
+    )
+    _add_jobmanager_args(jobmanager)
 
     return parser
 

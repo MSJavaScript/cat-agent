@@ -89,7 +89,7 @@ async def main() -> None:
             dotenv=".env",
             db=":memory:",
             job_manager_url="http://jobs",
-            skill_index_json="skills/skill_index.json",
+            skill_index_json="catagent/skills/skill_index.json",
             thread_id="t-cli",
         )
         await cli.run_cli(args)
