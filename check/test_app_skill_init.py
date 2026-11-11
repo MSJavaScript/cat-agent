@@ -7,13 +7,13 @@ node is called directly.  The loader and payload tests need no network either.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import io
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Any, Dict
+from unittest import mock
 
 import httpx
 from langchain.messages import ToolMessage
@@ -21,6 +21,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from catagent.agent import create_catagent
 from catagent.app import _build_parser
+from catagent._args import _build_command_parser, resolve_common_args
+from catagent._paths import SKILLS_ENV, default_skill_index
 from catagent.app.payloads import _message_payload
 from catagent.app.skills import load_skill_index
 from check.scripted_model import ScriptedModel
@@ -124,19 +126,30 @@ async def _test_graph_seeding() -> None:
     assert not command.update, "an existing thread must keep its loaded skills"
 
 
-def test_cli_option_required() -> None:
+def test_cli_option_default() -> None:
+    """The skill index is bundled, so the flag is optional."""
     parser = _build_parser()
-    args = parser.parse_args(["--skill-index-json", "skills/skill_index.json"])
-    assert args.skill_index_json == "skills/skill_index.json"
-    assert args.log is None
-    assert args.agent_log_level == "info"
-    try:
-        with contextlib.redirect_stderr(io.StringIO()):
-            parser.parse_args([])
-    except SystemExit:
-        pass
-    else:
-        raise AssertionError("--skill-index-json must be required")
+    args = parser.parse_args([])
+    assert args.skill_index_json is None
+    resolve_common_args(args)
+    assert Path(args.skill_index_json) == SKILL_INDEX.resolve()
+
+    # An explicit value is preserved for load_skill_index() to expand.
+    args = parser.parse_args(["--skill-index-json", "custom.json"])
+    resolve_common_args(args)
+    assert args.skill_index_json == "custom.json"
+
+    command = _build_command_parser().parse_args(["cli"])
+    resolve_common_args(command)
+    assert command.command == "cli"
+    assert Path(command.skill_index_json) == SKILL_INDEX.resolve()
+
+    server = _build_command_parser().parse_args(["server", "--port", "1234"])
+    assert server.command == "server"
+    assert server.port == 1234
+
+    with mock.patch.dict(os.environ, {SKILLS_ENV: str(SKILL_INDEX)}):
+        assert default_skill_index() == SKILL_INDEX.resolve()
 
 
 def test_agent_logging() -> None:
@@ -170,7 +183,7 @@ def main() -> None:
     test_moved_checkout()
     test_payload_limit()
     asyncio.run(_test_graph_seeding())
-    test_cli_option_required()
+    test_cli_option_default()
     test_agent_logging()
     print("APP SKILL/PAYLOAD TESTS: OK")
 

@@ -150,11 +150,13 @@ async def build_app(
 
     @app.get("/events/{thread_id}")
     async def events_route(thread_id: str, after: int = 0):
-        """Poll payloads for one thread after a known sequence number."""
-        return {
-            "thread_id": thread_id,
-            "events": app.state.event_log.since(thread_id, after),
-        }
+        """Poll payloads for one thread after a known sequence number.
+
+        ``generation``/``latest_seq`` let the browser notice that its cursor
+        belongs to a previous server process (or an evicted bucket) and replay
+        from zero instead of silently polling a stream that will never advance.
+        """
+        return {"thread_id": thread_id, **app.state.event_log.read(thread_id, after)}
 
     @app.post("/jobmanager/messages")
     async def jobmanager_messages(request: Request):

@@ -4,3 +4,7 @@ __pycache__/
 .env
 check/.tmp/
 ai-changes
+build/
+dist/
+*.egg-info/
+.venv/

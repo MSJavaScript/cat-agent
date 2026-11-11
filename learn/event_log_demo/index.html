@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>catagent event log demo</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2b303a;
+    --fg: #d7dce4; --dim: #8b93a1; --accent: #7cc4ff; --ok: #7ad48a;
+    --warn: #ffcc66; --err: #ff8a8a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  #status { color: var(--dim); font-size: 12px; }
+  main { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; padding: 14px 18px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  section > h2 {
+    margin: 0; padding: 8px 12px; font-size: 12px; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between;
+  }
+  #events, #jm {
+    height: 46vh; overflow: auto; padding: 8px 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .ev { display: flex; gap: 8px; align-items: baseline; }
+  .seq { color: var(--dim); min-width: 34px; text-align: right; }
+  .tag { color: var(--accent); min-width: 66px; }
+  .ev.jm .tag { color: var(--warn); }
+  .msg { white-space: pre-wrap; word-break: break-word; }
+  .controls { padding: 0 18px 18px; display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, textarea, button {
+    font: inherit; color: var(--fg); background: #101217;
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px;
+  }
+  input { width: 210px; }
+  textarea { flex: 1 1 320px; min-height: 38px; resize: vertical; }
+  button { cursor: pointer; background: #232833; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #1d3a52; border-color: #2f5d85; }
+  button.danger { border-color: #573030; }
+  .hint { color: var(--dim); font-size: 12px; max-width: 90ch; }
+  .banner { color: var(--warn); font-size: 12px; }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>catagent event-log demo</h1>
+  <span id="status">starting…</span>
+</header>
+
+<main>
+  <section>
+    <h2><span>thread events</span><span id="threadLabel"></span></h2>
+    <div id="events"></div>
+  </section>
+  <section>
+    <h2><span>jobmanager</span><span id="jmLabel">0</span></h2>
+    <div id="jm"></div>
+  </section>
+</main>
+
+<div class="controls">
+  <div class="row">
+    <label>thread</label>
+    <input id="threadId" spellcheck="false">
+    <button id="newThread">new thread</button>
+    <button id="clearView">clear view</button>
+  </div>
+
+  <div class="row">
+    <textarea id="input" placeholder="message to POST /chat"></textarea>
+    <button id="send" class="primary">send</button>
+  </div>
+
+  <div class="row">
+    <button id="callback">server-side callback</button>
+    <button id="jmMessage">jobmanager message</button>
+    <button id="restart" class="danger">restart server log</button>
+  </div>
+
+  <p class="hint">
+    <b>Send</b> starts a normal <code>POST /chat</code>. The page drains that SSE
+    response without parsing it; everything you see is rendered by polling
+    <code>GET /events/&lt;thread&gt;?after=&lt;cursor&gt;</code>.
+    <b>Server-side callback</b> simulates jobmanager resuming the thread: that
+    request comes from the server, not from this page.
+    <b>Restart server log</b> wipes the log and restarts sequence numbers at 1;
+    the page must detect the new generation and replay instead of freezing.
+  </p>
+  <p id="banner" class="banner"></p>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const JOBMANAGER_SOURCE = "__jobmanager__";
+  const POLL_MS = 500;
+
+  const statusEl = document.getElementById("status");
+  const threadLabelEl = document.getElementById("threadLabel");
+  const jmLabelEl = document.getElementById("jmLabel");
+  const eventsEl = document.getElementById("events");
+  const jmEl = document.getElementById("jm");
+  const threadInput = document.getElementById("threadId");
+  const inputEl = document.getElementById("input");
+  const bannerEl = document.getElementById("banner");
+
+  const state = {
+    threadId: "",
+    lastSeq: 0,
+    jmSeq: 0,
+    generation: null,   // identifies the server's log instance
+    latestSeq: 0,       // highest sequence the server has for this thread
+    jmCount: 0,
+    polling: false,
+  };
+
+  // ---------------------------------------------------------------- rendering
+
+  function line(parent, seq, tag, message) {
+    const row = document.createElement("div");
+    row.className = "ev" + (tag === "jobmanager" ? " jm" : "");
+
+    const seqEl = document.createElement("span");
+    seqEl.className = "seq";
+    seqEl.textContent = "#" + seq;
+
+    const tagEl = document.createElement("span");
+    tagEl.className = "tag";
+    tagEl.textContent = tag;
+
+    const msgEl = document.createElement("span");
+    msgEl.className = "msg";
+    msgEl.textContent = typeof message === "string"
+      ? message
+      : JSON.stringify(message, null, 2);
+
+    row.append(seqEl, tagEl, msgEl);
+    parent.append(row);
+    parent.scrollTop = parent.scrollHeight;
+  }
+
+  function renderEvent(event) {
+    const payload = event.payload || {};
+    const tag = payload.source === JOBMANAGER_SOURCE ? "jobmanager"
+      : (payload.type || "event");
+    line(eventsEl, event.seq, tag, payload.message);
+  }
+
+  function renderJobmanager(event) {
+    const payload = event.payload || {};
+    const tag = payload.phase ? payload.role + "/" + payload.phase : payload.role;
+    line(jmEl, event.seq, "jobmanager", tag + ": " + payload.message);
+    state.jmCount += 1;
+    jmLabelEl.textContent = String(state.jmCount);
+  }
+
+  function setStatus() {
+    const gen = state.generation ? state.generation.slice(0, 8) : "—";
+    statusEl.textContent =
+      "generation " + gen +
+      " · thread cursor " + state.lastSeq + "/" + state.latestSeq +
+      " · jm cursor " + state.jmSeq;
+  }
+
+  // -------------------------------------------------------------------- views
+
+  function setThread(tid) {
+    state.threadId = tid;
+    threadInput.value = tid;
+    state.lastSeq = 0;
+    state.latestSeq = 0;
+    eventsEl.replaceChildren();
+    threadLabelEl.textContent = tid || "";
+    setStatus();
+  }
+
+  function resetStreams() {
+    // The server replay starts at seq 1, so rendered history must be dropped
+    // or every replayed line would appear twice.
+    eventsEl.replaceChildren();
+    jmEl.replaceChildren();
+    state.lastSeq = 0;
+    state.jmSeq = 0;
+    state.latestSeq = 0;
+    state.jmCount = 0;
+    jmLabelEl.textContent = "0";
+    bannerEl.textContent =
+      "server log changed (restart or eviction) — cleared view and replayed from 0";
+  }
+
+  // ------------------------------------------------------------------ polling
+
+  // Mirrors resetView/serverResetRequired in catagent/app/debug_ui.html.
+  function serverResetRequired(data, after) {
+    const ahead = Number.isFinite(data.latest_seq) && after > data.latest_seq;
+    if (!data.generation) return ahead;
+    if (state.generation === null) return ahead;
+    return data.generation !== state.generation || ahead;
+  }
+
+  async function pollThread() {
+    if (!state.threadId) return false;
+    const after = state.lastSeq;
+    const response = await fetch(
+      "/events/" + encodeURIComponent(state.threadId) + "?after=" + after,
+      { cache: "no-store" },
+    );
+    if (!response.ok) throw new Error("events HTTP " + response.status);
+    const data = await response.json();
+
+    if (serverResetRequired(data, after)) {
+      state.generation = data.generation || state.generation;
+      resetStreams();
+      return true;
+    }
+    state.generation = data.generation || state.generation;
+    state.latestSeq = data.latest_seq || 0;
+    for (const event of data.events || []) {
+      if (event.seq <= state.lastSeq) continue;
+      state.lastSeq = event.seq;
+      renderEvent(event);
+    }
+    return false;
+  }
+
+  async function pollJobmanager() {
+    const after = state.jmSeq;
+    const response = await fetch(
+      "/events/" + encodeURIComponent(JOBMANAGER_SOURCE) + "?after=" + after,
+      { cache: "no-store" },
+    );
+    if (!response.ok) return false;
+    const data = await response.json();
+
+    if (serverResetRequired(data, after)) {
+      state.generation = data.generation || state.generation;
+      resetStreams();
+      return true;
+    }
+    state.generation = data.generation || state.generation;
+    for (const event of data.events || []) {
+      if (event.seq <= state.jmSeq) continue;
+      state.jmSeq = event.seq;
+      renderJobmanager(event);
+    }
+    return false;
+  }
+
+  async function pollLoop() {
+    if (state.polling) return;
+    state.polling = true;
+    try {
+      let replay = await pollThread();
+      replay = (await pollJobmanager()) || replay;
+      if (replay) {
+        // Both cursors are zero now: pull the retained history immediately.
+        if (state.threadId) await pollThread();
+        await pollJobmanager();
+        setTimeout(() => { bannerEl.textContent = ""; }, 4000);
+      }
+      setStatus();
+    } catch (err) {
+      statusEl.textContent = "poll error: " + err.message;
+    } finally {
+      state.polling = false;
+      setTimeout(pollLoop, POLL_MS);
+    }
+  }
+
+  // ------------------------------------------------------------------ actions
+
+  async function postChat() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    const body = { message: text, thread_id: state.threadId || undefined };
+    const response = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      statusEl.textContent = "chat HTTP " + response.status;
+      return;
+    }
+    const tid = response.headers.get("X-Thread-Id");
+    if (tid && tid !== state.threadId) setThread(tid);
+
+    // Intentionally NOT parsed: polling is the only rendering path, exactly
+    // like catagent/app/debug_ui.html.  Draining keeps the server's generator
+    // from back-pressuring.
+    await response.text();
+    inputEl.value = "";
+  }
+
+  async function triggerCallback() {
+    if (!state.threadId) {
+      statusEl.textContent = "send a message first to create a thread id";
+      return;
+    }
+    await fetch("/callback/" + encodeURIComponent(state.threadId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    bannerEl.textContent = "callback accepted by the server; no browser response to read";
+    setTimeout(() => { bannerEl.textContent = ""; }, 4000);
+  }
+
+  let jmMessages = 0;
+  async function postJobmanagerMessage() {
+    jmMessages += 1;
+    await fetch("/jobmanager/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role: "agent",
+        phase: "preprocessing",
+        message: "simulated jobmanager progress #" + jmMessages,
+      }),
+    });
+  }
+
+  async function restartServerLog() {
+    const response = await fetch("/_debug/restart", { method: "POST" });
+    const data = await response.json();
+    bannerEl.textContent =
+      "log replaced: " + data.old_generation.slice(0, 8) +
+      " -> " + data.new_generation.slice(0, 8) +
+      " (poll will notice)";
+  }
+
+  document.getElementById("send").addEventListener("click", postChat);
+  inputEl.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      postChat();
+    }
+  });
+  document.getElementById("callback").addEventListener("click", triggerCallback);
+  document.getElementById("jmMessage").addEventListener("click", postJobmanagerMessage);
+  document.getElementById("restart").addEventListener("click", restartServerLog);
+  document.getElementById("clearView").addEventListener("click", () => {
+    eventsEl.replaceChildren();
+    jmEl.replaceChildren();
+    state.jmCount = 0;
+  });
+  document.getElementById("newThread").addEventListener("click", () => {
+    setThread("demo-" + Math.random().toString(16).slice(2, 8));
+    setStatus();
+  });
+
+  setThread("demo-" + Math.random().toString(16).slice(2, 8));
+  pollLoop();
+})();
+</script>
+</body>
+</html>

@@ -537,6 +537,7 @@
     threadId: "",
     lastSeq: 0,
     jmSeq: 0,
+    generation: null,
     cards: new Map(),
     interrupts: new Map(),
     polling: false,
@@ -998,9 +999,36 @@
 
   // ------------------------------------------------------------------ polling
 
+  // The event log is volatile.  If the server restarted, our cursor points
+  // past the end of its new stream (sequence numbers start again at 1), so
+  // waiting for "seq > cursor" would freeze the view forever.  A changed
+  // generation -- or a cursor ahead of latest_seq, which also catches an
+  // evicted bucket -- means: clear the panes and replay from zero.
+  function serverResetRequired(data, after) {
+    const ahead = Number.isFinite(data.latest_seq) && after > data.latest_seq;
+    if (!data.generation) return ahead;
+    if (state.generation === null) return ahead;
+    return data.generation !== state.generation || ahead;
+  }
+
+  function adoptGeneration(data) {
+    if (data.generation) state.generation = data.generation;
+  }
+
+  function resetStreams() {
+    // Replay starts at seq 1, so the rendered history must go too; otherwise
+    // every replayed bubble would be appended a second time.
+    resetView();
+    state.jmSeq = 0;
+    jobmanagerEl.replaceChildren();
+    state.jmCount = 0;
+    jmCountEl.textContent = "0";
+    updateJumpbar();
+  }
+
   async function pollThread() {
     const tid = state.threadId;
-    if (!tid) return;
+    if (!tid) return false;
     const epoch = state.epoch;
     const after = state.lastSeq;
     const response = await fetch(
@@ -1009,26 +1037,43 @@
     );
     if (!response.ok) throw new Error("events HTTP " + response.status);
     const data = await response.json();
-    if (tid !== state.threadId || epoch !== state.epoch) return;  // view reset
+    if (tid !== state.threadId || epoch !== state.epoch) return false;  // view reset
+
+    if (serverResetRequired(data, after)) {
+      adoptGeneration(data);
+      resetStreams();
+      return true;  // caller replays once both cursors are back at zero
+    }
+    adoptGeneration(data);
     for (const event of data.events || []) {
       if (event.seq <= state.lastSeq) continue;
       state.lastSeq = event.seq;
       renderEvent(event);
     }
+    return false;
   }
 
   async function pollJobmanager() {
+    const after = state.jmSeq;
     const response = await fetch(
-      "/events/" + encodeURIComponent(JOBMANAGER_SOURCE) + "?after=" + state.jmSeq,
+      "/events/" + encodeURIComponent(JOBMANAGER_SOURCE) + "?after=" + after,
       { cache: "no-store" },
     );
-    if (!response.ok) return;
+    if (!response.ok) return false;
     const data = await response.json();
+
+    if (serverResetRequired(data, after)) {
+      adoptGeneration(data);
+      resetStreams();
+      return true;
+    }
+    adoptGeneration(data);
     for (const event of data.events || []) {
       if (event.seq <= state.jmSeq) continue;
       state.jmSeq = event.seq;
       renderJobmanager(event.payload || {});
     }
+    return false;
   }
 
   function schedulePoll(delay = POLL_MS) {
@@ -1040,8 +1085,14 @@
     if (state.polling) return;
     state.polling = true;
     try {
-      await pollThread();
-      await pollJobmanager();
+      let replay = await pollThread();
+      replay = (await pollJobmanager()) || replay;
+      if (replay) {
+        // Both cursors are zero and both panes were cleared: fetch the
+        // retained history now rather than waiting for the next tick.
+        if (state.threadId) await pollThread();
+        await pollJobmanager();
+      }
       if (!state.sending) {
         if (state.threadId) setStatus("live · " + state.threadId, "ok");
         else setStatus("live · new thread", "ok");

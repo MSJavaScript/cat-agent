@@ -13,27 +13,52 @@ invariants you must preserve when changing the code.
 
 ---
 
+## Installation
+
+```bash
+./install.sh                  # current Python environment
+./install.sh --user           # ~/.local, no root
+./install.sh --venv .venv     # create a virtualenv and install there
+./install.sh --editable       # editable install for development
+./install.sh --no-deps        # dependencies are already installed
+```
+
+The script installs the dependencies declared in `pyproject.toml` and a
+`catagent` console script. Only runtime files are installed: the development
+directories (`ai-changes/`, `check/`, `learn/`, `recycle/`), `jobmanager/demo/`,
+all `.env` files and `jobmanager/jobmanager_config.json` are excluded.
+Jobmanager configuration and model credentials are therefore always supplied by
+the user.
+
+The skills directory is part of the package, so `--skill-index-json` is
+optional. Override it with the flag or with `CATAGENT_SKILL_INDEX` when using a
+different skill set.
+
+---
+
 ## Quick start
 
 ```bash
-# 1. Model credentials (create .env; see Configuration)
+# 1. Install cat-agent and the `catagent` command (see Installation)
+./install.sh
+
+# 2. Model credentials (create .env; see Configuration)
 # MODEL_NAME=...
 # BASE_URL=...
 # API_KEY=...
 
-# 2. Optional: start the job manager for real job submission
+# 3. Optional: start the job manager for real job submission
 python -m jobmanager.server \
-    --setting jobmanager/jobmanager_config.json \
+    --setting /path/to/jobmanager_config.json \
     --host 127.0.0.1 --port 8000 --log jobmanager.log
 
-# 3. Run the agent with the debug CLI (in-process graph)
-python -m catagent.app \
-    --dotenv .env \
-    --db catagent_checkpoints.db \
-    --skill-index-json skills/skill_index.json
+# 4. Run the agent with the debug CLI (in-process graph)
+catagent cli --dotenv .env --db catagent_checkpoints.db
 ```
 
-The checkpoint database is created automatically. `--help` lists all options.
+The checkpoint database is created automatically. `catagent --help`,
+`catagent cli --help` and `catagent server --help` list all options. The legacy
+`python -m catagent.app` entry point continues to work with the same flags.
 
 ---
 
@@ -43,6 +68,9 @@ The checkpoint database is created automatically. `--help` lists all options.
 catagent/
 ├── agent.py                  Outer workflow: builds and wires the main graph.
 ├── run_agent.py              Standalone generic LangGraph streamer helper.
+├── _args.py                  Argument parsers (dependency-light, shared).
+├── _paths.py                 Locates the bundled skills index.
+├── _entrypoint.py            Entry point for the installed `catagent` command.
 ├── app/                      Application layer (HTTP service, CLI, runtime).
 │   ├── __init__.py           Package facade and common CLI/server entry point.
 │   ├── __main__.py           Entry point for `python -m catagent.app`.
@@ -76,8 +104,11 @@ catagent/
 
 jobmanager/                   Independent HTTP job submission service.
 tools/                        Computation/shell tools used by agents.
-skills/                       Scientific skills (docs, scripts, references).
+skills/                       Scientific skills shipped with the package.
 check/                        Fast deterministic tests + full e2e test harness.
+learn/                        Self-contained runnable demos of internal mechanisms.
+install.sh                    Installs dependencies and the `catagent` command.
+pyproject.toml, MANIFEST.in   Packaging: runtime files only, dev dirs excluded.
 ```
 
 `catagent/app.py` used to be one large module. It is now the `catagent/app`
@@ -281,10 +312,9 @@ Registering both would resume a job twice.
 ### 1. Debug CLI (in-process)
 
 ```bash
-python -m catagent.app \
+catagent cli \
     --dotenv .env \
     --db catagent_checkpoints.db \
-    --skill-index-json skills/skill_index.json \
     --job-manager-url http://127.0.0.1:8000 \
     --thread-id my-thread
 ```
@@ -292,21 +322,20 @@ python -m catagent.app \
 This runs the compiled graph in the current process, prints colored payloads,
 and asks for interrupt answers on stdin (JSON or free text). Submitted jobs are
 handled automatically: the CLI polls jobmanager's `/status/{job_uuid}` and
-resumes the graph when the durable result is ready.
+resumes the graph when the durable result is ready. The equivalent legacy
+invocation is `python -m catagent.app` with the same options.
 
 ### 2. HTTP server
 
 ```bash
-python -m catagent.app --serve \
+catagent server \
     --dotenv .env \
     --db catagent_checkpoints.db \
-    --skill-index-json skills/skill_index.json \
     --host 127.0.0.1 --port 5600 \
     --job-manager-url http://127.0.0.1:8000
 
-# --url implies --serve and overrides --host/--port
-python -m catagent.app --url http://127.0.0.1:5600 \
-    --skill-index-json skills/skill_index.json
+# --url overrides --host/--port
+catagent server --url http://127.0.0.1:5600
 ```
 
 Routes:
@@ -328,8 +357,7 @@ to stderr by default, or to a file with `--log`; `--agent-log-level` controls
 that logger independently of uvicorn's `--log-level`:
 
 ```bash
-python -m catagent.app --serve \
-    --skill-index-json skills/skill_index.json \
+catagent server \
     --log catagent.log --agent-log-level info \
     --log-level warning
 ```
@@ -358,7 +386,11 @@ The right-hand panel shows the jobmanager agent's progress. Point jobmanager's
 The panel is best-effort, exactly like jobmanager's progress stream. Job
 submissions resume automatically through the normal `callback_url`; other
 interrupts have an answer box in their own card. The event log is in memory and
-bounded, so it is intended for debugging only.
+bounded, so it is intended for debugging only. Each `/events` response carries
+the log's `generation` and per-thread `latest_seq`; the page uses them to notice
+a server restart (or an evicted bucket) and replay from zero instead of waiting
+on a cursor that can never advance. `learn/event_log_demo/` demonstrates the
+whole mechanism with a standalone FastAPI app.
 
 ---
 
