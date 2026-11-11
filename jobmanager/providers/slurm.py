@@ -4,7 +4,7 @@ from jobmanager.models import JobStatus, JobSetting
 
 from pydantic import BaseModel
 from typing import List, Dict, Literal, Optional, Set
-import os, logging
+import os, logging, shlex, shutil, tempfile, threading, contextlib
 import asyncio,paramiko, atexit, scp 
 
 logger = logging.getLogger("jobmanager")
@@ -27,6 +27,23 @@ class SlurmResource(BaseModel):
     memeory_size: Optional[float]
     video_memeory_size: Optional[float]
     price:Optional[float]
+
+
+def remote_shell_path(path: str) -> str:
+    """Quote a remote path for a shell command without breaking a leading ``~``.
+
+    ``shlex.quote("~/jobs/x")`` produces ``'~/jobs/x'``, and the quotes stop the
+    remote shell from expanding the tilde.  Slurm's ``remote_root`` is
+    ``~/jobs`` by default, so that turned every download into
+    ``cd: ~/jobs/<uuid>: No such file or directory``.  Keep the tilde
+    expandable by emitting ``"$HOME"/...`` instead.
+    """
+    if path == "~":
+        return '"$HOME"'
+    if path.startswith("~/"):
+        rest = path[2:]
+        return '"$HOME"/' + shlex.quote(rest) if rest else '"$HOME"'
+    return shlex.quote(path)
 
 
 def run_ssh_remote_command(client:paramiko.SSHClient, command:str) -> List[List[str]]|None:
@@ -93,7 +110,14 @@ class SlurmProvider(BaseProvider):
         except Exception as e:
             raise RuntimeError(f"Cannot connect to {user}@{host}. Error: {e}")
 
-        self.scp = scp.SCPClient(self.ssh_client.get_transport())
+        # `scp.SCPClient` keeps the channel and the in-progress transfer state
+        # on the instance, so one client must never be shared by concurrent
+        # transfers.  Finalization and submission run in parallel for different
+        # jobs; sharing one client transmitted one job's archive into another
+        # job's directory ("Underlying channel was closed", CRC errors, and
+        # Cu results delivered to the Si workdir).  Create a fresh client per
+        # transfer and serialize them for good measure.
+        self._scp_lock = threading.Lock()
         atexit.register(self.disconnect)
 
         self.resources:List[SlurmResource] = []
@@ -122,16 +146,38 @@ class SlurmProvider(BaseProvider):
 
     def disconnect(self):
         self.ssh_client.close()
-        self.scp.close()
         print("======== SSH disconnect ======== ")
         logger.info(f"SSH connection closed.")
+
+    def _scp_get(self, remote_path: str, local_path: str) -> None:
+        """Receive one path with a dedicated SCP channel.
+
+        A new ``SCPClient`` per call is required because the client instance
+        stores the active channel and transfer state; concurrent calls on a
+        shared instance cross the two streams.
+        """
+        with self._scp_lock:
+            client = scp.SCPClient(self.ssh_client.get_transport())
+            try:
+                client.get(remote_path, local_path)
+            finally:
+                client.close()
+
+    def _scp_put(self, local_path: str, remote_path: str) -> None:
+        with self._scp_lock:
+            client = scp.SCPClient(self.ssh_client.get_transport())
+            try:
+                client.put(local_path, remote_path)
+            finally:
+                client.close()
     
     def get_info(self) -> dict:
         return {
             "name": self.name, 
             "processing_units": self.processing_units,
             "job_envs": {key:self.job_envs[key].softwares for key in self.job_envs.keys()},
-            "remote_files": [ item["description"] for item in self.remote_files ]
+            "remote_files": [ {"description":item["description"], 
+                            "files":item["files"]} for item in self.remote_files ]
         }
     
     def get_remote_files_list(self) -> List[dict]:
@@ -155,14 +201,23 @@ class SlurmProvider(BaseProvider):
                 result[slurm_job_id] = JobStatus.NONE
             elif len(output[1]) > 0:
                 state = output[1][0].strip()
-                if state == "RUNNING":
+                if state in ("RUNNING", "COMPLETING", "CONFIGURING", "RESUMING"):
                     result[slurm_job_id] = JobStatus.RUNNING
-                elif state == "PENDING" or state == "SUSPENDED":
+                elif state in ("PENDING", "SUSPENDED"):
                     result[slurm_job_id] = JobStatus.SUBMITTED
                 elif state == "CANCELLED": #一个任务scancel足够长时间后slurm无法得到它的scancel状态
                     result[slurm_job_id] = JobStatus.CANCELLED
+                elif state == "COMPLETED":
+                    result[slurm_job_id] = JobStatus.COMPLETED
+                elif state in ("FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL",
+                               "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED",
+                               "SPECIAL_EXIT"):
+                    result[slurm_job_id] = JobStatus.FAILED
                 else:
-                    result[slurm_job_id] = JobStatus.UNKNOWN
+                    # Do not treat an unrecognized transient state as terminal.
+                    logger.warning(f"Unrecognized slurm state {state!r} for job "
+                                   f"{slurm_job_id}; will query it again.")
+                    result[slurm_job_id] = JobStatus.NONE
             elif len(output[2]) > 0 and "Invalid job id" in output[2][0]:
                 logger.error(f"Fail to get the job state of job {slurm_job_id} on {self.name}. Job may not exist.")
                 result[slurm_job_id] = JobStatus.UNKNOWN
@@ -185,24 +240,73 @@ class SlurmProvider(BaseProvider):
             logger.info(f"Job {slurm_job_id} on slurm {self.name} is cancelled.")
 
     async def download(self, slurm_job_id:str, reomte_dir:str, local_dir:str)->bool:
-        command = f"cd {reomte_dir} && tar -czf out.tar.gz --exclude='out.tar.gz' * "
+        if not os.path.isdir(local_dir):
+            raise NotADirectoryError(f"{local_dir} is not a directory.")
+
+        # Do not reject the archive just because tar printed a warning (for
+        # example about a file that changed while it was being read): tar
+        # writes warnings to stderr even when the archive is valid.  Ask tar
+        # for an explicit marker and require a non-empty archive instead.
+        command = (f"cd {remote_shell_path(reomte_dir)} && "
+                   f"tar -czf out.tar.gz --exclude='out.tar.gz' * && "
+                   f"test -s out.tar.gz && echo __SLURM_TAR_OK__")
         result = await asyncio.to_thread(run_ssh_remote_command,
                                 client=self.ssh_client,
                                 command=command)
         if result is None:
             logger.error(f"Cannot compress files in {reomte_dir}, SSH error.")
             return False
-        if len(result[2]) != 0:
-            logger.error(f"Cannot compress files in {reomte_dir}. Error: {''.join(result[2])}.")
-            return False 
-        # 如果文件不存在会抛出异常 scp.SCPException
-        await asyncio.to_thread(self.scp.get, 
-                                remote_path=os.path.join(reomte_dir, 'out.tar.gz'), 
-                                local_path=local_dir)
-        await run_shell_command(f"tar -xf out.tar.gz && rm -f out.tar.gz", cwd=local_dir)
+        if not any("__SLURM_TAR_OK__" in line for line in result[1]):
+            logger.error(f"Cannot compress files in {reomte_dir}. "
+                         f"Error: {''.join(result[2]).strip()}")
+            return False
+
+        # Download into a fresh temp directory.  Writing straight into
+        # local_dir leaves a truncated out.tar.gz behind when SCP fails; the
+        # next retry would then extract stale/mixed data.
+        tmpdir = tempfile.mkdtemp(prefix="slurm_download_")
+        try:
+            await asyncio.to_thread(
+                self._scp_get,
+                os.path.join(reomte_dir, "out.tar.gz"),
+                tmpdir)
+            archive = os.path.join(tmpdir, "out.tar.gz")
+            if not os.path.isfile(archive) or os.path.getsize(archive) == 0:
+                logger.error(f"Downloaded archive for {slurm_job_id} is missing or empty.")
+                return False
+
+            # Validate the complete gzip/tar stream before touching local_dir.
+            # A truncated transfer must never overwrite the previous result.
+            output = await run_shell_command(
+                f"tar -tzf {shlex.quote(archive)} >/dev/null", cwd=tmpdir, timeout=120)
+            if output["return_code"] != 0:
+                logger.error(f"Downloaded archive for {slurm_job_id} is corrupt: "
+                             f"{output['stderr'].strip()}")
+                return False
+
+            # The archive is complete and verified, so result files may
+            # overwrite older files (including files left by a failed
+            # download).  Inputs are excluded to keep the local workdir
+            # authoritative for them.
+            output = await run_shell_command(
+                f"tar -xzf {shlex.quote(archive)} -C {shlex.quote(local_dir)} "
+                f"--exclude='*.py' --exclude='*.json' --exclude='*.md' --exclude='*.sh' "
+                f"--exclude=INCAR --exclude=POSCAR --exclude='POTCAR*'",
+                cwd=tmpdir, timeout=120)
+            if output["return_code"] != 0:
+                logger.error(f"Fail to unpack the result archive in {local_dir}. "
+                             f"{output['stderr'].strip()}")
+                return False
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # A failed older download may have left this file in the workdir.
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(os.path.join(local_dir, "out.tar.gz"))
+
         logger.info(f"The result files of {slurm_job_id} is downloaded in to {local_dir}. ")
         # 清理远程的压缩包文件
-        command = f"cd {reomte_dir} && rm -f out.tar.gz"
+        command = f"cd {remote_shell_path(reomte_dir)} && rm -f out.tar.gz"
         await asyncio.to_thread(run_ssh_remote_command, client=self.ssh_client, command=command)
         return True 
 
@@ -216,7 +320,8 @@ class SlurmProvider(BaseProvider):
             raise FileNotFoundError(f"There should be a run.sh file in directory {setting.local_dir}. ")
 
         # 这里要做的只是把目录上传到远端然后提交。
-        command = f"if [ -d {setting.remote_dir} ]; then rm -f -r {setting.remote_dir}; fi && mkdir -p {setting.remote_dir}"
+        remote_dir = remote_shell_path(setting.remote_dir)
+        command = f"if [ -d {remote_dir} ]; then rm -f -r {remote_dir}; fi && mkdir -p {remote_dir}"
         await asyncio.to_thread(run_ssh_remote_command,
                                 client=self.ssh_client,
                                 command=command)
@@ -224,12 +329,12 @@ class SlurmProvider(BaseProvider):
         await run_shell_command(command="tar -czf input.tar.gz --exclude='input.tar.gz' * ",
                                 cwd=setting.local_dir,
                                 timeout=120)
-        # 上传到远端
-        await asyncio.to_thread(self.scp.put,
-                                files=os.path.join(setting.local_dir, 'input.tar.gz'),
-                                remote_path=setting.remote_dir)
+        # 上传到远端。每次传输使用独立的 SCP 通道，避免并发上传/下载互相踩踏。
+        await asyncio.to_thread(self._scp_put,
+                                os.path.join(setting.local_dir, 'input.tar.gz'),
+                                setting.remote_dir)
         # 在远端解压然后提交任务
-        command = f"cd {setting.remote_dir} && tar -xf input.tar.gz && rm -f input.tar.gz "
+        command = f"cd {remote_dir} && tar -xf input.tar.gz && rm -f input.tar.gz "
         await asyncio.to_thread(run_ssh_remote_command,
                                          client=self.ssh_client,
                                          command=command)
@@ -238,7 +343,7 @@ class SlurmProvider(BaseProvider):
                                 cwd=setting.local_dir,
                                 timeout=120)
 
-        command = f"bash -l -c 'cd {setting.remote_dir} && sbatch run.sh'"
+        command = f"bash -l -c 'cd {remote_dir} && sbatch run.sh'"
         result = await asyncio.to_thread(run_ssh_remote_command,
                                                  client=self.ssh_client,
                                                  command=command)
@@ -253,7 +358,7 @@ class SlurmProvider(BaseProvider):
         # 删除远端的目录
         await asyncio.to_thread(run_ssh_remote_command,
                                 client=self.ssh_client,
-                                command=f"rm -f -r {remote_dir}. ")
+                                command=f"rm -f -r {remote_shell_path(remote_dir)}.")
 
 
     

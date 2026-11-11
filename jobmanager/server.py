@@ -1,11 +1,11 @@
 import logging, logging.handlers, json, os, queue, dotenv, argparse, uvicorn
-from jobmanager.models import JobRequest
+from jobmanager.models import JobRequest, AgentResumeInfo
 from jobmanager.db import JobDB
 from jobmanager.base import BaseProvider
 from jobmanager.providers.bohr import BohrProvider
 from jobmanager.providers.slurm import SlurmProvider
 from jobmanager.providers.local import LocalProvider
-
+ 
 from jobmanager.manager import JobManager
 from jobmanager.agent.agent import JobManagerAgent
 
@@ -143,6 +143,7 @@ def build_app(setting_json_path:str) -> FastAPI:
                          retry_callback=setting.get("retry_callback", [5, 10, 20]),
                          n_retry_get_status=setting.get("n_retry_get_status", 3),
                          n_retry_job_submit=setting.get("n_retry_job_submit", 3),
+                         max_finalize_retries=setting.get("max_finalize_retries", 5),
                          front_end_url=setting.get("front_end_url", None))
     
     @asynccontextmanager
@@ -154,11 +155,23 @@ def build_app(setting_json_path:str) -> FastAPI:
 
     app = FastAPI(title="Computation Job Manager", version="0.0.1", lifespan=lifespan)
 
+    @app.get("/health")
+    async def health() -> JSONResponse:
+        # Some process/environment health checkers probe /health even when the
+        # service does not need it.  Answering avoids noisy 404 lines in the
+        # uvicorn log; it only reports that the HTTP process is alive.
+        return JSONResponse({"status": "ok"})
+
     @app.post("/submit")
     async def submit(req:JobRequest) -> JSONResponse:
         response = await manager.submit_job(req)
         return JSONResponse(response)
 
+    @app.post("/set-thread-id")
+    async def set_thread_id(req:AgentResumeInfo) -> JSONResponse:
+        await manager.set_thread_id(req.job_uuid, req.thread_id, req.interrupt_id)
+        return JSONResponse({"status":"success", "message": "thread_id and interrupt_id is added into database." })
+    
     @app.post("/cancel/{job_uuid}")
     async def cancel(job_uuid: str) -> JSONResponse:
         response = await manager.cancel_job(job_uuid)
@@ -178,10 +191,10 @@ def build_app(setting_json_path:str) -> FastAPI:
 
     @app.get("/providers")
     async def get_providers_info() -> JSONResponse:
-        info_dict = dict()
+        info_list = []
         for key in providers.keys():
-            info_dict[key] = providers[key].get_info()
-        return JSONResponse(info_dict)
+            info_list.append( providers[key].get_info())
+        return JSONResponse(info_list)
 
     return app
 
@@ -189,7 +202,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Job manager fastapi backend.")
     parser.add_argument("--setting", type=str, required=True, help="Path to the setting json file.")
     parser.add_argument("--host", type=str, required=True, help="Host of app.")
-    parser.add_argument("--port", type=str, required=True, help="Port of app.")
+    parser.add_argument("--port", type=int, required=True, help="Port of app.")
     parser.add_argument("--log", type=str, required=True, help="Path to log file.")
     parser.add_argument("--level", type=str, default="info", choices=["info", "debug"], help="Log level.")
     args = parser.parse_args()

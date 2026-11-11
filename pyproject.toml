@@ -1,0 +1,15 @@
+[project]
+name = "cat-agent"
+version = "0.0.1"
+dependencies = [
+    "langgraph==1.2.11",
+    "langchain==1.3.15",
+    "python-dotenv",
+    "langchain-qwq",
+    "pymatgen",
+    "rdkit",
+    "fastapi",
+    "uvicorn",
+    "aiosqlite",
+    "paramiko"
+]

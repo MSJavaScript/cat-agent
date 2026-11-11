@@ -1,6 +1,7 @@
 {
     "callback_url": "http://localhost:5600",
-    "front_end_url": "http://localhost:5601",
+    "db_path":"",
+    "front_end_url": "http://localhost:5600/jobmanager/messages",
     "poll_interval": 60,
     "retry_job_download": [5, 10, 20],
     "retry_callback": [5, 10, 20],
@@ -8,6 +9,25 @@
     "n_retry_job_submit":3,
 
     "providers":{
+        "local-mock": {
+            "type": "local",
+            "processing_units": ["cpu"],
+            "resources": [],
+            "job_envs": {
+                "mock-compute": {
+                    "softwares": [
+                        "mock-prepare",
+                        "mock-relax",
+                        "mock-analyze",
+                        "mock-report (sleep-based fake software)"
+                    ],
+                    "initialize_command": [
+                        "export PATH=/mnt/t/programming/myagents/cat-agent-dev/check/mock_software/bin:${PATH}"
+                    ]
+                }
+            }
+        },
+
         "local": {
             "type": "local",
             "processing_units": ["cpu", "gpu"],
@@ -82,7 +102,7 @@
                     "files": [ "DPA4-Neo-OMat24-v20260805.pt"]
                 }
             ],
-
+ 
             "job_envs": {
                 "vasp-5.4.4": {
                     "image_path": "registry.dp.tech/dptech/dp/native/prod-996952/vasp-abacus-dftb:dftb",

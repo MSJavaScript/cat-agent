@@ -4,7 +4,7 @@ from jobmanager.models import JobStatus, JobSetting
 
 from pydantic import BaseModel, Field
 from typing import List, Dict, Literal, Optional, Set, Tuple
-import os, logging, json, asyncio
+import os, logging, json, asyncio, shlex, shutil
 from subprocess import check_output
 
 logger = logging.getLogger("jobmanager")
@@ -97,7 +97,8 @@ class BohrProvider(BaseProvider):
             "name": self.name, 
             "processing_units": self.processing_units,
             "job_envs": {key:self.job_envs[key].softwares for key in self.job_envs.keys()},
-            "remote_files": [ item["description"] for item in self.remote_files ]
+            "remote_files": [ {"description":item["description"], 
+                               "files":item["files"]} for item in self.remote_files ]
         }
 
     def get_remote_files_list(self) -> List[dict]:
@@ -121,15 +122,31 @@ class BohrProvider(BaseProvider):
             logger.error(f"Cannot get the state of job with id {jid}: {output['stderr'].strip()}")
             return jid, JobStatus.NONE
         statusStr = output["stdout"].strip()
-        if statusStr == "Scheduling":
-            return jid, JobStatus.SUBMITTED
-        if statusStr == "Failed":
+        if statusStr:
+            # `awk ... | tail -1` also returns the header cell while the job
+            # is still being created, and the CLI may emit other transient
+            # words before the job is running.  Treat anything we cannot map
+            # as "state not known yet" (NONE) instead of UNKNOWN: UNKNOWN is a
+            # terminal state for the manager and would make it download the
+            # results of a job that has not produced any output yet.
+            statusStr = statusStr.splitlines()[-1].strip()
+        if statusStr in ("Finished", "Completed", "Succeeded", "Success"):
+            return jid, JobStatus.COMPLETED
+        if statusStr in ("Failed", "Error"):
             return jid, JobStatus.FAILED
         if statusStr == "Running":
             return jid, JobStatus.RUNNING
-        if statusStr == "Finished":
-            return jid, JobStatus.COMPLETED
-        return jid, JobStatus.UNKNOWN
+        if statusStr in ("Scheduling", "Pending", "Queued", "Queueing",
+                         "Waiting", "Creating", "Submitted"):
+            return jid, JobStatus.SUBMITTED
+        if statusStr in ("Cancelled", "Canceled", "Terminated"):
+            return jid, JobStatus.CANCELLED
+        if statusStr in ("", "statusStr"):
+            logger.debug(f"Job {jid} has no status yet (describe returned {statusStr!r}).")
+        else:
+            logger.warning(f"Job {jid} has an unrecognized status {statusStr!r}; "
+                           f"will query it again.")
+        return jid, JobStatus.NONE
 
     async def get_job_states(self, bohr_job_ids:Set[str]) -> Dict[str, JobStatus]:
         # 并发查询，避免顺序执行几百个CLI调用拖长整个轮询周期。
@@ -154,7 +171,13 @@ class BohrProvider(BaseProvider):
     async def download(self, bohr_job_id:str, reomte_dir:str, local_dir:str)->bool:
         if not os.path.isdir(local_dir):
             raise NotADirectoryError(f"{local_dir} is not a directory.")
-        
+
+        zipdir = os.path.join(local_dir, bohr_job_id)
+        # `bohr job download` writes <jobid>/out.zip below local_dir.  Remove
+        # anything left by an earlier failed attempt so a stale archive is
+        # never mistaken for the new download.
+        await asyncio.to_thread(shutil.rmtree, zipdir, ignore_errors=True)
+
         command = f"bohr job download -j {bohr_job_id}"
         try:
             output = await run_shell_command(command, local_dir, 300)
@@ -167,13 +190,43 @@ class BohrProvider(BaseProvider):
             logger.exception(f"Fail to download the job {bohr_job_id} result on bohr. {e}")
             return False 
 
+        out_zip = os.path.join(zipdir, "out.zip")
+        if not os.path.isfile(out_zip) or os.path.getsize(out_zip) == 0:
+            logger.error(f"Download of job {bohr_job_id} produced no out.zip in {zipdir}.")
+            return False
+
         try:
-            zipdir = os.path.join(local_dir, bohr_job_id)
-            output = await run_shell_command("unzip out.zip", zipdir, 120)
+            # Reject a truncated/incomplete zip before extracting anything.
+            output = await run_shell_command("unzip -t out.zip", zipdir, 120)
+            if output["return_code"] != 0:
+                logger.error(f"Downloaded out.zip for job {bohr_job_id} is corrupt: "
+                             f"{output['stderr'].strip()}")
+                return False
+
+            output = await run_shell_command(
+                "unzip -o out.zip -x \"*.md\" \"*.json\" \"*.sh\" \"*.py\"",
+                zipdir, 120)
             if output["return_code"] != 0:
                 logger.error(f"Fail to unzip out.zip in {zipdir}. {output['stderr'].strip()}")
                 return False 
-            output = await run_shell_command(f"mv {bohr_job_id}/* . && rm -f out.zip && rm -f -r {bohr_job_id}", local_dir, 120)
+
+            # Merge the downloaded files into local_dir.  `mv <dir>/* .` nests a
+            # directory when local_dir already contains a non-empty directory
+            # with the same name; rsync merges recursively instead.  Result
+            # files overwrite older ones so a retry can replace data from a
+            # failed transfer, while the user's inputs are left untouched.
+            output = await run_shell_command(
+                f"rsync -a --exclude=INCAR --exclude=POSCAR --exclude='POTCAR*' "
+                f"--exclude=run.sh --exclude=job.json --exclude=job_description.json "
+                f"--exclude='*.md' --exclude='*.sh' --exclude='*.py' "
+                f"{shlex.quote(bohr_job_id)}/ . "
+                f"&& rm -f {shlex.quote(bohr_job_id)}/out.zip "
+                f"&& rm -rf {shlex.quote(bohr_job_id)}",
+                local_dir, 120)
+            if output["return_code"] != 0:
+                logger.error(f"Fail to merge the downloaded results into {local_dir}. "
+                             f"{output['stderr'].strip()}")
+                return False
             logger.info(f"Result files are unzip to {local_dir}")
         except Exception as e:
             logger.exception(f"Fail to unzip and clean the downloaded results in {zipdir}")
@@ -195,7 +248,7 @@ class BohrProvider(BaseProvider):
 --dataset_path "{','.join(setting.access_remote_dirs) if setting.access_remote_dirs else ''}" \\
 --command "bash run.sh " \\
 --log_file "tmp.log" \\
---backward_files "{','.join(setting.result_patterns) if setting.result_patterns else '*'}" \\
+--backward_files "*" \\
 --input_directory "./"
 '''
         try:

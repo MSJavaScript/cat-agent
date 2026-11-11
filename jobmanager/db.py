@@ -1,9 +1,18 @@
-from typing import Optional
+from typing import Optional, Literal
 
 import asyncio, contextlib, aiosqlite, json, sqlite3
-from jobmanager.models import JobRecord, SubJobRecord, JobStatus
+from jobmanager.models import (
+    JobRecord, SubJobRecord, JobStatus, SubmissionState, FinalizeState,
+)
 
 ACTIVE_STATUS = (JobStatus.SUBMITTED.value, JobStatus.RUNNING.value)
+TERMINAL_STATUS = (
+    JobStatus.COMPLETED.value,
+    JobStatus.FAILED.value,
+    JobStatus.CANCELLED.value,
+    JobStatus.UNKNOWN.value,
+    JobStatus.NONE.value,
+)
 ERROR_STATUS_PRIORITY = (
     JobStatus.CANCELLED.value,
     JobStatus.FAILED.value,
@@ -69,6 +78,8 @@ class JobDB:
         await self._db.execute('''
         CREATE TABLE IF NOT EXISTS jobs (
             job_uuid         TEXT PRIMARY KEY,
+            thread_id        TEXT,
+            interrupt_id     TEXT,
             description      TEXT,
             provider_id      TEXT NOT NULL,
             job_env_name     TEXT NOT NULL,
@@ -79,7 +90,12 @@ class JobDB:
             updated_at       TEXT NOT NULL,
             callback_pending INTEGER NOT NULL DEFAULT 0,
             attempt          INTEGER NOT NULL DEFAULT 0,
-            error            TEXT DEFAULT ''
+            error            TEXT DEFAULT '',
+            submission_state TEXT NOT NULL DEFAULT 'submitted',
+            finalize_state   TEXT NOT NULL DEFAULT 'none',
+            finalize_attempt INTEGER NOT NULL DEFAULT 0,
+            result_status    TEXT,
+            result_error     TEXT
         )
         ''')
 
@@ -122,7 +138,61 @@ class JobDB:
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sub_jobs_remote_id ON sub_jobs(remote_id)"
         )
+        # Migrate before creating indexes on the new columns; an existing
+        # database does not have `finalize_state` / `submission_state` yet.
+        await self._migrate_schema()
         await self._db.commit()
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_finalize_state "
+            "ON jobs(finalize_state)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_submission_state "
+            "ON jobs(submission_state)"
+        )
+        await self._db.commit()
+
+    async def _job_columns(self) -> set[str]:
+        cur = await self._db.execute("PRAGMA table_info(jobs)")
+        rows = await cur.fetchall()
+        await cur.close()
+        return {row[1] for row in rows}
+
+    async def _migrate_schema(self) -> None:
+        """Add columns introduced after the first database layout.
+
+        Existing terminal rows are marked `pending` for finalization: re-running
+        finalize is safer than trusting the old infer-from-status callback,
+        which could report success even when no result files were downloaded.
+        """
+        columns = await self._job_columns()
+
+        added_finalize = False
+        if "submission_state" not in columns:
+            await self._db.execute(
+                "ALTER TABLE jobs ADD COLUMN submission_state TEXT "
+                "NOT NULL DEFAULT 'submitted'")
+        if "finalize_state" not in columns:
+            await self._db.execute(
+                "ALTER TABLE jobs ADD COLUMN finalize_state TEXT "
+                "NOT NULL DEFAULT 'none'")
+            added_finalize = True
+        if "finalize_attempt" not in columns:
+            await self._db.execute(
+                "ALTER TABLE jobs ADD COLUMN finalize_attempt INTEGER "
+                "NOT NULL DEFAULT 0")
+        if "result_status" not in columns:
+            await self._db.execute(
+                "ALTER TABLE jobs ADD COLUMN result_status TEXT")
+        if "result_error" not in columns:
+            await self._db.execute(
+                "ALTER TABLE jobs ADD COLUMN result_error TEXT")
+
+        if added_finalize:
+            placeholders = ",".join("?" for _ in TERMINAL_STATUS)
+            await self._db.execute(
+                f"UPDATE jobs SET finalize_state = 'pending' "
+                f"WHERE status IN ({placeholders})", TERMINAL_STATUS)
 
     async def close(self):
         if self._db is not None:
@@ -133,6 +203,8 @@ class JobDB:
     def _row_to_job(row: aiosqlite.Row) -> JobRecord:
         return JobRecord(
             job_uuid=row["job_uuid"],
+            thread_id=row["thread_id"] or "",
+            interrupt_id=row["interrupt_id"] or "",
             description=row["description"],
             provider_id=row["provider_id"],
             job_env_name=row["job_env_name"],
@@ -143,7 +215,14 @@ class JobDB:
             updated_at=row["updated_at"],
             callback_pending=bool(row["callback_pending"]),
             attempt=row["attempt"],
-            error=row["error"])
+            error=row["error"],
+            submission_state=SubmissionState(
+                row["submission_state"] or SubmissionState.SUBMITTED.value),
+            finalize_state=FinalizeState(
+                row["finalize_state"] or FinalizeState.NONE.value),
+            finalize_attempt=row["finalize_attempt"] or 0,
+            result_status=row["result_status"],
+            result_error=row["result_error"])
     
     @staticmethod
     def _row_to_sub_job(row: aiosqlite.Row) -> SubJobRecord:
@@ -171,8 +250,10 @@ class JobDB:
             sql = """INSERT INTO jobs
                    ( job_uuid, description, provider_id, job_env_name, local_dir,
                    result_patterns, status, created_at, updated_at,
-                   callback_pending, attempt, error)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                   callback_pending, attempt, error,
+                   submission_state, finalize_state, finalize_attempt,
+                   result_status, result_error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(job_uuid) DO UPDATE SET
                        description=excluded.description,
                        provider_id=excluded.provider_id,
@@ -183,17 +264,26 @@ class JobDB:
                        updated_at=excluded.updated_at,
                        callback_pending=excluded.callback_pending,
                        attempt=excluded.attempt,
-                       error=excluded.error"""
+                       error=excluded.error,
+                       submission_state=excluded.submission_state,
+                       finalize_state=excluded.finalize_state,
+                       finalize_attempt=excluded.finalize_attempt,
+                       result_status=excluded.result_status,
+                       result_error=excluded.result_error"""
         else:
             sql = """INSERT INTO jobs
                    ( job_uuid, description, provider_id, job_env_name, local_dir,
                    result_patterns, status, created_at, updated_at,
-                   callback_pending, attempt, error)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
+                   callback_pending, attempt, error,
+                   submission_state, finalize_state, finalize_attempt,
+                   result_status, result_error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
         params = (
             rec.job_uuid, rec.description, rec.provider_id, rec.job_env_name, rec.local_dir,
             json.dumps(rec.result_patterns), rec.status.value, rec.created_at, rec.updated_at,
-            int(rec.callback_pending), rec.attempt, rec.error or ""
+            int(rec.callback_pending), rec.attempt, rec.error or "",
+            rec.submission_state.value, rec.finalize_state.value, rec.finalize_attempt,
+            rec.result_status, rec.result_error,
         )
         async with self._write_lock:
             async with self._transaction() as db:
@@ -231,15 +321,65 @@ class JobDB:
         return records
 
     async def list_callback_pending(self) -> list[JobRecord]:
-        """Terminal rows whose callback has not yet succeeded (or was lost to
-        a crash). Boot sweep re-POSTs these for at-least-once delivery."""
-        
+        """Rows whose final result is persisted but whose callback was not
+        acknowledged. Boot sweep re-POSTs these for at-least-once delivery."""
         cur = await self._db.execute(
-            "SELECT * FROM jobs WHERE callback_pending = 1 ORDER BY updated_at ASC"
+            "SELECT * FROM jobs WHERE finalize_state = ? AND callback_pending = 1 "
+            "ORDER BY updated_at ASC", (FinalizeState.READY.value,)
         )
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_job(r) for r in rows]
+
+    async def list_finalize_pending(self) -> list[JobRecord]:
+        """Terminal rows whose final result has not been decided yet.
+
+        Included states are PENDING (never started) and FINALIZING (crashed
+        while downloading/checking).  A crash during download must be retried,
+        never turned into a success callback by the boot sweep.
+        """
+        cur = await self._db.execute(
+            "SELECT * FROM jobs WHERE finalize_state IN (?, ?) "
+            "ORDER BY updated_at ASC",
+            (FinalizeState.PENDING.value, FinalizeState.FINALIZING.value),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return [self._row_to_job(r) for r in rows]
+
+    async def list_incomplete_submissions(self) -> list[JobRecord]:
+        """Active rows whose plan was not fully submitted.
+
+        This covers a crash after the HTTP request was accepted (no plan yet),
+        a crash after the plan was persisted but before every remote id was
+        written, and legacy placeholders that have no sub_jobs at all.
+        """
+        active = ",".join("?" for _ in ACTIVE_STATUS)
+        incomplete = ",".join("?" for _ in (
+            SubmissionState.PLANNING.value,
+            SubmissionState.PLANNED.value,
+            SubmissionState.SUBMITTING.value,
+        ))
+        cur = await self._db.execute(
+            f"""SELECT * FROM jobs
+                WHERE status IN ({active})
+                  AND (submission_state IN ({incomplete})
+                       OR NOT EXISTS (
+                           SELECT 1 FROM sub_jobs
+                           WHERE sub_jobs.job_uuid = jobs.job_uuid))
+                ORDER BY created_at ASC""",
+            ACTIVE_STATUS + (
+                SubmissionState.PLANNING.value,
+                SubmissionState.PLANNED.value,
+                SubmissionState.SUBMITTING.value,
+            ),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        records = [self._row_to_job(r) for r in rows]
+        for rec in records:
+            rec.sub_jobs = await self.get_sub_jobs(rec.job_uuid)
+        return records
     
     async def list_all(self, limit: int = 200) -> list[JobRecord]:
         cur = await self._db.execute(
@@ -260,22 +400,49 @@ class JobDB:
     #         (remote_id, remote_dir, status.value, _now(), job_uuid),
     #     )
     #     await self._db.commit()
+    # thread_id        TEXT,
+    #             interrupt_id     TEXT,
 
-    async def update_status(self, job_uuid: str, status: JobStatus) -> None:
-        await self._db.execute(
-            """UPDATE jobs SET status = ?, 
-               updated_at = ? WHERE job_uuid = ?""",
-            (status.value,  _now(), job_uuid),
-        )
-        await self._db.commit()
-
-    async def set_error(self, job_uuid: str, status: JobStatus, error: str, attempt: int) -> None:
-        now = _now()
+    async def set_thread_id(self, job_uuid:str, thread_id:str, interrupt_id:str) -> None:
+        # Registration is best-effort and can be repeated when the outer graph
+        # re-emits a bundle of pending interrupts.  An empty value means the
+        # caller could not identify the resume target yet; never let it erase a
+        # valid registration.
         async with self._write_lock:
             async with self._transaction() as db:
                 await db.execute(
-                    """UPDATE jobs SET status = ?, error = ?, attempt = ?, updated_at = ?
+                    """UPDATE jobs SET
+                           thread_id = CASE WHEN ? != '' THEN ? ELSE thread_id END,
+                           interrupt_id = CASE WHEN ? != '' THEN ? ELSE interrupt_id END
                        WHERE job_uuid = ?""",
+                    (thread_id or "", thread_id or "",
+                     interrupt_id or "", interrupt_id or "", job_uuid))
+
+    async def update_status(self, job_uuid: str, status: JobStatus) -> None:
+        terminal = status.value in TERMINAL_STATUS
+        finalize_sql = (
+            ", finalize_state = CASE WHEN finalize_state = 'none' "
+            "THEN 'pending' ELSE finalize_state END" if terminal else "")
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    f"""UPDATE jobs SET status = ?, updated_at = ?{finalize_sql}
+                        WHERE job_uuid = ?""",
+                    (status.value, _now(), job_uuid),
+                )
+
+    async def set_error(self, job_uuid: str, status: JobStatus, error: str, attempt: int) -> None:
+        now = _now()
+        terminal = status.value in TERMINAL_STATUS
+        finalize_sql = (
+            ", finalize_state = CASE WHEN finalize_state = 'none' "
+            "THEN 'pending' ELSE finalize_state END" if terminal else "")
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    f"""UPDATE jobs SET status = ?, error = ?, attempt = ?,
+                        updated_at = ?{finalize_sql}
+                        WHERE job_uuid = ?""",
                     (status.value, error, attempt, now, job_uuid),
                 )
                 # 错误状态传播到所有还在排队或运行的子作业，避免轮询继续查询已终止的子作业
@@ -287,11 +454,103 @@ class JobDB:
                 )
 
     async def set_callback_pending(self, job_uuid: str, flag:bool) -> None:
-        await self._db.execute(
-             "UPDATE jobs SET callback_pending = ?, updated_at = ? WHERE job_uuid = ?",
-            ((1 if flag else 0), _now(), job_uuid),
-        )
-        await self._db.commit()
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    "UPDATE jobs SET callback_pending = ?, updated_at = ? WHERE job_uuid = ?",
+                    ((1 if flag else 0), _now(), job_uuid),
+                )
+
+    async def set_submission_state(self, job_uuid: str,
+                                   state: SubmissionState) -> None:
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    "UPDATE jobs SET submission_state = ?, updated_at = ? "
+                    "WHERE job_uuid = ?",
+                    (state.value, _now(), job_uuid),
+                )
+
+    async def save_plan(self, job_uuid: str, subs: list[SubJobRecord]) -> None:
+        """Persist the group plan before any remote job is started."""
+        async with self._write_lock:
+            async with self._transaction() as db:
+                for sub in subs:
+                    await self._upsert_sub_job(sub, replace=True)
+                await db.execute(
+                    "UPDATE jobs SET submission_state = ?, updated_at = ? "
+                    "WHERE job_uuid = ?",
+                    (SubmissionState.PLANNED.value, _now(), job_uuid),
+                )
+
+    async def claim_finalize(self, job_uuid: str) -> bool:
+        """Atomically move a terminal row into FINALIZING.
+
+        Returns False when the row is already READY/DELIVERED (another worker
+        already produced the result) so finalize never runs twice.
+        """
+        async with self._write_lock:
+            async with self._transaction() as db:
+                cur = await db.execute(
+                    "UPDATE jobs SET finalize_state = ?, updated_at = ? "
+                    "WHERE job_uuid = ? AND finalize_state IN (?, ?)",
+                    (FinalizeState.FINALIZING.value, _now(), job_uuid,
+                     FinalizeState.PENDING.value, FinalizeState.FINALIZING.value),
+                )
+                claimed = cur.rowcount > 0
+                await cur.close()
+                return claimed
+
+    async def set_result_ready(self, job_uuid: str,
+                               status: Literal["success", "error"],
+                               error: Optional[str]) -> None:
+        """Persist the final result and mark the callback outbox row ready."""
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    """UPDATE jobs SET finalize_state = ?, result_status = ?,
+                       result_error = ?, callback_pending = 1, updated_at = ?
+                       WHERE job_uuid = ?""",
+                    (FinalizeState.READY.value, status, error or "",
+                     _now(), job_uuid),
+                )
+
+    async def mark_callback_delivered(self, job_uuid: str) -> None:
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    """UPDATE jobs SET finalize_state = ?, callback_pending = 0,
+                       updated_at = ? WHERE job_uuid = ?""",
+                    (FinalizeState.DELIVERED.value, _now(), job_uuid),
+                )
+
+    async def reset_finalize(self, job_uuid: str) -> None:
+        """Return a terminal row to the pre-finalize state for a resubmission."""
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    """UPDATE jobs SET finalize_state = ?, callback_pending = 0,
+                       finalize_attempt = 0, result_status = NULL,
+                       result_error = NULL, updated_at = ?
+                       WHERE job_uuid = ?""",
+                    (FinalizeState.NONE.value, _now(), job_uuid),
+                )
+
+    async def increment_finalize_attempt(self, job_uuid: str) -> int:
+        """Count one failed download/finalize pass and return the new count."""
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    """UPDATE jobs SET finalize_attempt = finalize_attempt + 1,
+                       updated_at = ? WHERE job_uuid = ?""",
+                    (_now(), job_uuid),
+                )
+                cur = await db.execute(
+                    "SELECT finalize_attempt FROM jobs WHERE job_uuid = ?",
+                    (job_uuid,))
+                row = await cur.fetchone()
+                await cur.close()
+                return int(row["finalize_attempt"]) if row else 0
 
     async def delete_job(self, job_uuid: str) -> None:
         async with self._write_lock:
@@ -300,12 +559,14 @@ class JobDB:
                 await db.execute("DELETE FROM jobs WHERE job_uuid = ?", (job_uuid,))
 
     async def insert_sub_job(self, sub: SubJobRecord) -> None:
-        await self._upsert_sub_job(sub, replace=False)
-        await self._db.commit()
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await self._upsert_sub_job(sub, replace=False)
 
     async def save_sub_job(self, sub: SubJobRecord) -> None:
-        await self._upsert_sub_job(sub, replace=True)
-        await self._db.commit()
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await self._upsert_sub_job(sub, replace=True)
 
     async def _upsert_sub_job(self, sub: SubJobRecord, replace: bool) -> None:
         if replace:
@@ -411,12 +672,14 @@ class JobDB:
     async def set_sub_job_remote(self, job_uuid: str, group_index: int,
                                  remote_id: str, remote_dir: Optional[str],
                                  status: JobStatus) -> None:
-        await self._db.execute(
-            """UPDATE sub_jobs SET remote_id = ?, remote_dir = ?, status = ?,
-                updated_at = ? WHERE job_uuid = ? AND group_index = ?""",
-            (remote_id, remote_dir, status.value, _now(), job_uuid, group_index),
-        )
-        await self._db.commit()
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    """UPDATE sub_jobs SET remote_id = ?, remote_dir = ?, status = ?,
+                        updated_at = ? WHERE job_uuid = ? AND group_index = ?""",
+                    (remote_id, remote_dir, status.value, _now(),
+                     job_uuid, group_index),
+                )
 
     async def update_sub_job_status(self, remote_id: str, status: JobStatus) -> None:
         """更新子作业状态，并重新聚合作业（jobs表）的总状态。"""
@@ -443,15 +706,28 @@ class JobDB:
         if not rows:
             return JobStatus.SUBMITTED
         new_status = _aggregate_status([r["status"] for r in rows])
-        await self._db.execute(
-            "UPDATE jobs SET status = ?, updated_at = ? WHERE job_uuid = ?",
-            (new_status.value, _now(), job_uuid),
-        )
+        if new_status.value in TERMINAL_STATUS:
+            # Enter the finalize state machine exactly once.  Once READY or
+            # DELIVERED, later updates must not move it back to PENDING.
+            await self._db.execute(
+                """UPDATE jobs SET status = ?, updated_at = ?,
+                   finalize_state = CASE WHEN finalize_state = 'none'
+                       THEN 'pending' ELSE finalize_state END
+                   WHERE job_uuid = ?""",
+                (new_status.value, _now(), job_uuid),
+            )
+        else:
+            await self._db.execute(
+                "UPDATE jobs SET status = ?, updated_at = ? WHERE job_uuid = ?",
+                (new_status.value, _now(), job_uuid),
+            )
         return new_status
 
     async def delete_sub_jobs(self, job_uuid: str) -> None:
-        await self._db.execute("DELETE FROM sub_jobs WHERE job_uuid = ?", (job_uuid,))
-        await self._db.commit()
+        async with self._write_lock:
+            async with self._transaction() as db:
+                await db.execute(
+                    "DELETE FROM sub_jobs WHERE job_uuid = ?", (job_uuid,))
 
 def _now() -> str:
     from datetime import datetime, timezone

@@ -12,11 +12,12 @@ class BaseProvider(ABC):
     def get_info(self) -> dict:
         '''
         Return the basic informations of the provider.
-        Returns:
+        Returns: 
             A dict with 3 keys:
             - "name": Name of provider.
             - "processing_units": Available processing units of provider, can be cpu or gpu.
             - "job_envs": Available job environments and softwares.
+            - "remote_files": Available remote files on the provider.
         '''
         ...
 

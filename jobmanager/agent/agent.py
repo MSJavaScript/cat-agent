@@ -5,13 +5,14 @@ from langchain.tools import tool, ToolRuntime
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph.graph.state import CompiledStateGraph
 from langchain.agents.middleware import wrap_model_call, ModelRequest, ModelResponse
+from langchain.agents.structured_output import ToolStrategy
 from typing import Callable
 
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Dict
 from jobmanager.base import BaseProvider
 from pydantic import BaseModel, Field
-from .util_tools import execute_shell, edit_file
+from .util_tools import execute_shell, edit_file, preprocessing_validation
 import os, httpx, logging
 
 
@@ -31,16 +32,19 @@ class PreprocessingOutput(BaseModel):
     batch_job: bool    = Field(description="If this is a batch job.", default=False)
     n_jobs: int        = Field(description="The total number of jobs.", default=1)
     n_groups: Optional[int] = Field(description="The number of groups, only valid for batch job.", default=None)
-    group_dirs_wildcard: Optional[str] = Field(description="A wildcard for group_dirs, only valid for batch job.", default=None)
+    group_dirs: Optional[List[str]] = Field(description="The dir names or dir wildcards for each job group. A group has ONLY one `run.sh` and `job_description.json` file in the group dir.", default=None)
 
 class CheckingOutput(BaseModel):
     '''
     Structured output for checking phase.
     '''
     job_result_status: Literal["Success", "InputError", "EnvironmentError"] = Field(description="The status of the downloaded job results.", default=None)
-    error_message:str = Field(description="The brief summary of the errors in job results, within 3 to 5 sentences.", default=None)
+    message:str = Field(description="The brief summary or error messages of job results, within 3 to 5 sentences.", default=None)
 
 class JobManagerAgentOutput(BaseModel):
+    '''
+    Final structured output.
+    '''
     phase: Literal["preprocessing", "checking"] = Field(description="Phase of the current task. Preprocessing of remote job submissions or checking the results of downloaded jobs.")
     preprocessing_output: Optional[PreprocessingOutput] = Field(description="Output for preprocessing phase.", default=None)
     checking_output: Optional[CheckingOutput] = Field(description="Output for checking phase.", default=None)
@@ -132,9 +136,9 @@ class JobManagerAgent:
                              system_prompt=this.system_prompt,
                              checkpointer=checkpointer, 
                              tools=[execute_shell, edit_file, get_resources,
-                                     get_job_env, get_remote_files_list],
+                                     get_job_env, get_remote_files_list, preprocessing_validation],
                              context_schema=JobManagerAgentContext,
-                             response_format=JobManagerAgentOutput,
+                             response_format=ToolStrategy(JobManagerAgentOutput, handle_errors=True),
                              middleware=[phase_based_tools])
         return agent 
 
@@ -154,9 +158,9 @@ async def run_job_agent(
     最后返回一个结果
     '''
     if phase == "checking":
-        message = HumanMessage(f"Check the job results download in local dir {local_dir}.")
+        message = HumanMessage(f"Check the job results download in local dir {local_dir}. For the final output, make sure to generate a structured `CheckingOutput` object for the `checking_output` field.")
     else:
-        message = HumanMessage(f"Preprocess the job inputs in local dir {local_dir}.")
+        message = HumanMessage(f"Preprocess the job inputs in local dir {local_dir}. For the final output, make sure to generate a structured `PreprocessingOutput` object for the `preprocessing_output` field.")
 
     context = JobManagerAgentContext(provider_id=provider_id, 
                                      job_env_name=job_env_name,
@@ -181,15 +185,17 @@ async def run_job_agent(
             if isinstance(msg, AIMessage):
                 payload = {"role": "agent",
                            "message": msg.content,
-                           "tool_calls": f"{msg.tool_calls}" if msg.tool_calls else ""}
+                           "tool_calls": f"{msg.tool_calls}" if msg.tool_calls else "",
+                           "phase": phase}
                 
                 log_msg = f"[Agent]: {msg.content}" + f"\n[Tool calls]: {msg.tool_calls}" if msg.tool_calls else ""
             elif isinstance(msg, ToolMessage):
                 payload = {"role":"tool",
-                           "message": msg.content}
+                           "message": msg.content,
+                           "phase": phase}
                 log_msg = f"[Tool]: {msg.content}"
             else:
-                payload = {"role":None, "message":msg}
+                payload = {"role":None, "message":msg, "phase": phase}
                 log_msg = f"[Message]: {msg}"
 
             if log_msg:

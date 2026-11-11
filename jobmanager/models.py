@@ -22,6 +22,10 @@ class JobSetting(BaseModel):
     job_env_name:  str
     # 机器类型或分区类型由任务agent指定。科学计算agent不知道这些信息。
     resource_name: Optional[str] = None
+    # Stable key for one (job_uuid, group_index).  Providers may use it to make
+    # `submit` idempotent: re-submitting the same key must not start a second
+    # remote job.
+    idempotency_key: Optional[str] = None
 
 
 class JobType(str, Enum):
@@ -39,6 +43,38 @@ class JobStatus(str, Enum):
     UNKNOWN   = "unknown"  # 查询状态的函数成功，但没有返回这个作业的信息
     NONE      = "none"     # 调用查询状态的函数失败返回None
 
+
+class SubmissionState(str, Enum):
+    """Durable state of the submit phase.
+
+    The plan (one sub_jobs row per group) is written before any remote job is
+    started, and each remote id is persisted as soon as it is known.  A crash
+    at any point therefore leaves enough information to resume instead of
+    submitting everything twice.
+    """
+
+    PLANNING = "planning"      # preprocessing is running, no plan yet
+    PLANNED = "planned"        # sub_jobs persisted, no remote id yet
+    SUBMITTING = "submitting"  # at least one remote job has been started
+    SUBMITTED = "submitted"    # every group has a remote id
+    FAILED = "failed"
+
+
+class FinalizeState(str, Enum):
+    """Durable state of the finalize phase.
+
+    `callback_pending` is an outbox flag: it is only set once the final result
+    is persisted (result_status/result_error).  `finalize_state` distinguishes
+    "result not decided yet" from "ready to deliver" so a crash during download
+    can be retried instead of being mistaken for a successful delivery.
+    """
+
+    NONE = "none"
+    PENDING = "pending"        # job is terminal, finalize not started
+    FINALIZING = "finalizing"  # finalize in progress; crash => retry
+    READY = "ready"            # result persisted, callback not delivered
+    DELIVERED = "delivered"    # callback acknowledged
+
 class SubJobRecord(BaseModel):
 
     job_uuid:    str # 所属作业的uuid
@@ -53,6 +89,8 @@ class SubJobRecord(BaseModel):
 
 class JobRecord(BaseModel):
     job_uuid:    str # Agent 分配的uuid
+    thread_id:   str = "" # Resume agent 时的thread_id, filled by /set-thread-id after submit
+    interrupt_id: str = "" # 对应的interrupt id, filled by /set-thread-id after submit
     description: str # 作业的描述
     provider_id: str 
     job_env_name:str # 作业运行的环境名称
@@ -67,6 +105,17 @@ class JobRecord(BaseModel):
     # 如果任务出错记录错误原因，由一个agent提取。目前没有agent参与设为空字符串。
     error: Optional[str] = None 
     sub_jobs:List[SubJobRecord] = []
+    # Durable submit/finalize state machines.  Defaults match rows written by
+    # older versions, which had already been submitted.
+    submission_state: SubmissionState = SubmissionState.SUBMITTED
+    finalize_state: FinalizeState = FinalizeState.NONE
+    # Number of download/finalize attempts already spent.  A transient
+    # download failure keeps the row in FINALIZING so the polling loop can
+    # try again instead of reporting "results lost" and forcing a resubmit.
+    finalize_attempt: int = 0
+    # Outbox payload: filled exactly once when the final result is decided.
+    result_status: Optional[Literal["success", "error"]] = None
+    result_error: Optional[str] = None
     
 class JobRequest(BaseModel):
     job_uuid: str     # Agent 分配的uuid
@@ -76,8 +125,15 @@ class JobRequest(BaseModel):
     job_env_name: str # 提供商的环境名称
     result_patterns: List[str] #回收文件的模式
 
+class AgentResumeInfo(BaseModel):
+    job_uuid: str 
+    thread_id:str
+    interrupt_id:str
+
 class JobResult(BaseModel):
     job_uuid: str 
+    thread_id:   str # Resume agent 时的thread_id
+    interrupt_id: str # 对应的interrupt id
     local_dir: str
     status: Literal["error", "success"]
     error_msg: Optional[str]
