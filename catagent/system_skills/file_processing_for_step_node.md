@@ -1,0 +1,178 @@
+# Make good use of bash and python for batch file processing
+
+When we need to process batch of files, use bash and python to complete the task is much faster and cheaper. Below is an example of preparing VASP inputs in batch (just as demonstration, not for real working code).
+ 
+Suppose we have built a series of initial and final states (IS and FS), we want to build the inputs for NEB calculation. Suppose the POSCARs are named in format 
+`POSCAR_<state>_<reaction_name>_<facet>_<index>`, for example `POSCAR_ini_CH3-CH2+H_Cu111_0`. `state` is `ini` or `fin`, `reaction_name` is the abbreviation of an elementary reaction,  `facet` is the slab miller index,  `index` is the configuration index (an adsorbate may have many configurations).
+
+To generate NEB inputs in batch, we need some preparations. Firstly, obtain POTCARs for all elements. For example:
+```bash
+mkdir potcars
+for m in C:C O:O H:H Rh:Rh_pv
+do
+    cp ${potcar_lib_path}/${m#*:}/POTCAR potcars/POTCAR_${m%:*}
+done
+```
+Then generate KPOINTS for all the facets:
+```bash
+python3 generate_kpoints.py --poscar POSCAR_211 -o KPOINTS_211 mesh --abc '5,5,1' -s gamma
+# Also generate KPOINTS for POSCAR_111 and POSCAR_step
+```
+We can generate the inputs for IS and FS relaxation by the following script:
+```bash
+# If POSCARs exist in many subdirs, use `find` 
+# find "$source_dir" -type f -name "POSCAR*" -print0 |
+# while IFS= read -r -d '' poscar; do
+#     # process the ${poscar}
+# done
+
+for poscar in POSCAR_*
+do
+    state=`echo ${poscar} | cut -d_ -f2`
+    facet=`echo ${poscar} | cut -d_ -f4`
+    idx=`echo ${poscar} | cut -d_ -f5`
+    reac=`echo ${poscar} | cut -d_ -f3`
+
+    dir=${facet}/${reac}_${idx}/${state}
+    mkdir -p ${dir}
+
+    eles=`sed -n '6p' ${poscar}`
+    for e in ${eles}
+    do
+        echo potcars/POTCAR_${e} >> POTCAR
+    done
+
+    natoms=`sed -n '7p' ${poscar}`
+
+    mv ${poscar} ${dir}/POSCAR
+    mv POTCAR ${dir}
+    # `INCAR_opt` is the INCAR for the structure relaxation of IS and FS
+    # Suppose there are not MAGMOM or LDAUU tags
+    # which depend on POSCAR, so you can use the same INCAR
+    cp INCAR_opt ${dir}/INCAR
+    cp KPOINTS_${facet} ${dir}/KPOINTS
+done
+```
+Submit the relaxation jobs in batch. 
+
+Suppose all the calculations have converged, we can generate NEB inputs. 
+
+```bash
+# Workdir of IS and FS relaxation
+# dir structure is ${facet}/${reac}_${idx}/${state}
+relax_wd="" 
+
+# workdir of NEB
+# dir structure is ${facet}/neb_${reac}_${idx}
+neb_wd="" 
+
+# Firstly copy all the necessary files to workdir of NEB
+cd ${relax_wd}
+for facet in 111 211 step
+do
+    cd ${facet}
+    for d in *
+    do
+        if [ -d ${d} ]
+        then
+            cd ${d}
+                cp ini/CONTCAR ${neb_wd}/CONTCAR_ini_${facet}_${d}
+                cp fin/CONTCAR ${neb_wd}/CONTCAR_fin_${facet}_${d}
+                cp ini/OUTCAR ${neb_wd}/OUTCAR_ini_${facet}_${d}
+                cp fin/OUTCAR ${neb_wd}/OUTCAR_fin_${facet}_${d}
+                cp ini/KPOINTS ${neb_wd}/KPOINTS_${facet}_${d}
+                cp ini/POTCAR ${neb_wd}/POTCAR_${facet}_${d}
+                cp ini/INCAR ${neb_wd}/INCAR_draft_${facet}_${d}
+            cd ..
+        fi
+    done
+    cd ..
+done
+cd ..
+
+# Then prepare NEB inputs 
+cd ${neb_wd}
+
+# backup files. If we make a mistake, we can retry
+mkdir backup
+cp INCAR* POSCAR* KPOINTS* POTCAR* backup/
+
+for facet in 111 211 step
+do
+    mkdir ${facet}
+    con_ini=`ls | grep CONTCAR_ini_${facet}`
+    for fname in ${con_ini}
+    do
+        reac_idx=${fname#*${facet}_}
+        mkdir ${facet}/neb_${reac_idx}
+
+        ini=${fname}
+        fin=CONTCAR_fin_${facet}_${reac_idx}
+        dist=`python3 dist.py ${ini} ${fin}`
+        nimage=`python3 -c "print(int(${dist}/0.6))"`
+        if [ ${nimage} -gt 8 ]
+        then
+            nimage=8
+        fi
+
+        python3 neb_make.py --ini ${ini} --fin ${fin} --nimages ${nimage}
+
+        suffix=${facet}_${reac_idx}
+
+        let a=nimage+1
+        mv OUTCAR_ini_${suffix} 00/OUTCAR
+        mv OUTCAR_fin_${suffix} 0${a}/OUTCAR
+
+        mv 0* ${ini} ${fin} ${facet}/neb_${reac_idx}
+        mv KPOINTS_${suffix} ${facet}/neb_${reac_idx}/KPOINTS
+        mv POTCAR_${suffix} ${facet}/neb_${reac_idx}/POTCAR
+
+        mv INCAR_${suffix} INCAR
+        sed -i "/IBRION\|NSW\|POTIM\|EDIFFG/d" INCAR
+        printf "NSW=50\nIBRION=3\nPOTIM=0.0\nIOPT=1\nICHAIN=0 " >> INCAR
+        printf "\nIMAGES=${nimage}\nLCLIMB=.TRUE.\nSPRING=-5" >> INCAR
+        mv INCAR  ${facet}/neb_${reac_idx}
+    done
+done
+cd ..
+```
+
+At last we, randomly pick 3~5 subdirs to check the INCAR tags and integrity of input files (Because we are doing this with script, if some of them are correct, we can conclude that all of them are correct).
+```bash
+cd neb_111_CH3+H-CH4_0
+# check INCAR
+cat INCAR 
+# check POSCAR
+ls 0* 
+# check POTCAR, the order of elements should match with POSCAR
+grep PAW_PBE POTCAR 
+# just print first 10 lines
+head 01/POSCAR
+cd ..
+```
+
+**Some more tips**:
+1. NEVER use `cat` to get the content of a structure or files generated by softwares (e.g. *.cif, *.extxyz, POSCAR, OUTCAR, etc.), they contain large amount text which is meaningless to you. Use `grep`, `sed` etc to get a chunk of content or use python packages such as `ase` and `pymatgen` to get.
+2. Use python or awk for numerical calculations, for example
+
+    ```bash
+    awk 'BEGIN{print exp(1)}'  # 2.71828
+    awk 'BEGIN{printf "%.2f\n", 10/3}'  # 3.33
+    # Simple integer operation 
+    i=1
+    let i=i+1  # 2
+    i=$((i+3)) # 5
+    ```
+
+    Use python for complex calculations
+    ```bash
+    python3 -c "print(sum(range(10)))"
+
+    python3 << 'EOF'
+    import numpy as np
+    import matplotlib.pyplot as plt
+    x = np.linspace(0, 10, 100)
+    plt.plot(x, np.sin(x**2))
+    plt.savefig("plot.jpg", dpi=150)
+    EOF
+    ```

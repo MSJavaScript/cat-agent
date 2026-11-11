@@ -1,0 +1,254 @@
+{
+    "callback_url": "http://localhost:5600",
+    "db_path":"",
+    "front_end_url": "http://localhost:5600/jobmanager/messages",
+    "poll_interval": 60,
+    "retry_job_download": [5, 10, 20],
+    "retry_callback": [5, 10, 20],
+    "n_retry_get_status":3,
+    "n_retry_job_submit":3,
+
+    "providers":{
+        "local-mock": {
+            "type": "local",
+            "processing_units": ["cpu"],
+            "resources": [],
+            "job_envs": {
+                "mock-compute": {
+                    "softwares": [
+                        "mock-prepare",
+                        "mock-relax",
+                        "mock-analyze",
+                        "mock-report (sleep-based fake software)"
+                    ],
+                    "initialize_command": [
+                        "export PATH=/mnt/t/programming/myagents/cat-agent-dev/check/mock_software/bin:${PATH}"
+                    ]
+                }
+            }
+        },
+
+        "local": {
+            "type": "local",
+            "processing_units": ["cpu", "gpu"],
+            "resources":[ ],
+            "job_envs": {
+                "deepmd-kit":{
+                    "softwares": ["deepmd-kit with DPA3", "lammps", "ase", "scipy"],
+                    "initialize_command":[
+                        "conda activate /mnt/t/softwares_install/deepmd-kit"
+                    ]
+                }
+            }
+        },
+
+        "bohr": {
+            "type": "bohr",
+            "processing_units": ["cpu", "gpu"],
+
+            "project_id": 29496,
+            "platform": "ali",
+            "job_type": "container",
+            "command": "bash run.sh",
+
+            "resources": [
+                {
+                    "machine_name": "c8_m16_cpu",
+                    "machine_type": "cpu",
+                    "n_cpu_core": 8,
+                    "memeory_size": 16,
+                    "price":0.64
+                },
+                {
+                    "machine_name": "c16_m32_cpu",
+                    "machine_type": "cpu",
+                    "n_cpu_core": 16,
+                    "memeory_size": 32,
+                    "price":1.28
+                },
+                {
+                    "machine_name": "c32_m64_cpu",
+                    "machine_type": "cpu",
+                    "n_cpu_core": 32,
+                    "memeory_size": 64,
+                    "price":2.56
+                },
+                {
+                    "machine_name": "c64_m128_cpu",
+                    "machine_type": "cpu",
+                    "n_cpu_core": 64,
+                    "memeory_size": 128,
+                    "price":5.12
+                },
+                {
+                    "machine_name": "1 * NVIDIA V100_32g",
+                    "machine_type": "gpu",
+                    "video_memeory_size":32,
+                    "price": 4.5
+                },
+                {
+                    "machine_name": "1 * NVIDIA 4090_24g",
+                    "machine_type": "gpu",
+                    "video_memeory_size":24,
+                    "price": 5.5
+                }
+
+            ],
+
+            "remote_files":[
+                {
+                    "description": "The pre-trained models of MLFF, includeing MACE, DPA3, DPA4.",
+                    "path": "/bohr/luandong-fundation-models-92x5/v7",
+                    "files": [ "DPA4-Neo-OMat24-v20260805.pt"]
+                }
+            ],
+ 
+            "job_envs": {
+                "vasp-5.4.4": {
+                    "image_path": "registry.dp.tech/dptech/dp/native/prod-996952/vasp-abacus-dftb:dftb",
+                    "softwares": ["vasp-5.4.4", "ase"],
+                    "initialize_command": [
+                        "source /opt/intel/oneapi/setvars.sh",
+                        "export FI_PROVIDER=tcp",
+                        "export PATH=/opt/vasp-5.4.4/vasp_modify_final/bin/:${PATH}"
+                    ]
+                },
+
+                "vasp-6.3.2": {
+                    "image_path": "registry.dp.tech/dptech/dp/native/prod-28882/vasp-ase:6.3.2-vtst",
+                    "softwares": ["vasp-6.3.2", "ase"],
+                    "initialize_command": [
+                        "source /opt/intel/oneapi/setvars.sh",
+                        "export FI_PROVIDER=tcp"
+                    ]
+                },
+
+                "deepmd-kit": {
+                    "image_path":"registry.dp.tech/dptech/dpa-calculator:dpa4-mlip-af22e2c5",
+                    "softwares": ["deepmd-kit (includeing newest dpa4)", "ase", "lammps"]
+                }
+
+            }
+        },
+
+        "ai4ms-server":{
+            "type":"slurm",
+            "processing_units": ["cpu", "gpu"],
+
+
+            "host": "172.16.50.119",
+            "user": "luandong",
+            "port": 22,
+            "password": "iajrmqtwls",
+            "keyfile": "",
+            "remote_root": "~/jobs",
+
+            "resources": [
+                {
+                    "partition_name": "compute01",
+                    "partition_type": "gpu",
+                    "n_nodes":2,
+                    "n_cpu_core": 96
+                }
+
+            ],
+
+            "remote_files":[],
+
+            "job_envs": {
+                "vasp-6.3.2":{
+                    "softwares": ["vasp-6.3.2"],
+                    "initialize_command": [
+                        "module load vasp/6.3.2",
+                        "ulimit -s unlimited"
+                    ]
+                }
+            }
+        },
+
+        "slurm_gpu":{
+            "type": "slurm",
+            "processing_units": ["gpu"],
+            "host": "ssh.cn-zhongwei-1.paracloud.com",
+            "user": "scv7tgu@BSCC-N26",
+            "port": 22,
+            "password": "",
+            "keyfile": "/home/luandong/.ssh/id_ed25519",
+            "remote_root": "~/jobs",
+            "resources": [
+                {
+                    "partition_name": "gpu",
+                    "partition_type": "gpu",
+                    "n_nodes": 50,
+                    "n_cpu_core": 10
+                }
+            ],
+
+            "remote_files":[],
+            "job_envs": {}
+
+        },
+
+
+        "slurm-1": {
+            "type": "slurm",
+            "processing_units": ["cpu"],
+
+            "host": "ssh.cn-zhongwei-1.paracloud.com",
+            "user": "pxyl281@GUANGZHOUXYL",
+            "port": 22,
+            "password": "",
+            "keyfile": "/home/luandong/.ssh/id_ed25519",
+            "remote_root": "~/jobs",
+
+            "resources": [
+                {
+                    "partition_name": "mars_l",
+                    "partition_type": "cpu",
+                    "n_cpu_core": 64,
+                    "n_nodes": 254
+                },
+
+                {
+                    "partition_name": "deimos_l",
+                    "partition_type": "cpu",
+                    "n_cpu_core": 64,
+                    "n_nodes": 1712
+                }
+
+            ],
+
+            "remote_files":[],
+
+            "job_envs": {
+                
+                "vasp-5.4.4":{
+                    "softwares": ["vasp-5.4.4 with vtst"],
+                    "initialize_command":[
+                        "module load intel/oneapi2023.2_impi",
+                        "export PATH=/HOME/paratera_xy/pxyl281/download/vasp_modify_final/bin/:${PATH}"
+                    ]
+                },
+
+                "vasp-6.4.0":{
+                    "softwares":["vasp-6.4.0 with vtst"],
+                    "initialize_command": [
+                        "module load intel/oneapi2023.2_impi",
+                        "export PATH=/HOME/paratera_xy/pxyl281/software-pxyl281/6.4.0-vtst:$PATH"
+                    ]
+                },
+
+                "ase":{
+                    "softwares": ["ase", "numpy", "scipy", "matplotlib"],
+                    "initialize_command": [
+                        "source ~/softwares_install/myenv/bin/activate"
+                    ]
+                }
+
+            }
+        }
+
+
+    }
+}
+

@@ -1,0 +1,1224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cat-agent debug console</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f6fa;
+    --panel: #ffffff;
+    --panel-2: #eef2f7;
+    --border: #d7dee8;
+    --text: #1f2937;
+    --muted: #64748b;
+    --accent: #1d6fd6;
+    --user: #b7791f;
+    --agent: #0b7285;
+    --tool: #2f855a;
+    --interrupt: #7c3aed;
+    --custom: #64748b;
+    --jobmanager: #c05621;
+    --danger: #c53030;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: #ffffff;
+  }
+
+  .jumpbar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--border);
+    background: #f8fafc;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+  }
+  .jumpbar .jump-label {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .09em;
+  }
+  .jump-chips {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .jump-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    max-width: 280px;
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: #ffffff;
+    color: var(--text);
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .jump-chip:hover { border-color: #94a3b8; background: #eef2f7; }
+  .jump-chip:focus-visible {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, .2);
+  }
+  .jump-chip .chip-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--agent);
+    flex: 0 0 auto;
+  }
+  .jump-chip.orchestrator .chip-dot { background: var(--accent); }
+  .jump-chip.step .chip-dot { background: var(--tool); }
+  .jump-chip.agent .chip-dot { background: var(--agent); }
+  .jump-chip.jobmanager .chip-dot { background: var(--jobmanager); }
+  .jump-chip .chip-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .jump-chip .chip-count {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0 5px;
+  }
+  .agent-card.flash { animation: card-flash 1.2s ease-out; }
+  @keyframes card-flash {
+    0% { box-shadow: 0 0 0 3px rgba(59, 130, 246, .45); }
+    100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .agent-card.flash {
+      animation: none;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, .35);
+    }
+  }
+
+  .brand {
+    font-weight: 700;
+    letter-spacing: .02em;
+    white-space: nowrap;
+  }
+  .brand span {
+    color: var(--muted);
+    font-weight: 500;
+    margin-left: 6px;
+  }
+
+  .threadbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+  .threadbar label {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+  #threadId {
+    flex: 1;
+    min-width: 220px;
+    max-width: 620px;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 9px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+
+  button {
+    background: #f1f5f9;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 11px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover { border-color: #94a3b8; background: #e2e8f0; }
+  button:disabled { opacity: .55; cursor: default; }
+
+  .status {
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 280px;
+  }
+  .status.ok { color: var(--tool); }
+  .status.busy { color: var(--accent); }
+  .status.err { color: var(--danger); }
+
+  main {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+    gap: 12px;
+    padding: 12px;
+    overflow: hidden;
+  }
+
+  .agents-pane {
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-right: 4px;
+  }
+  #agents {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 0 0 auto;
+  }
+
+  .empty {
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 28px;
+    color: var(--muted);
+    text-align: center;
+    background: rgba(15, 23, 42, .02);
+  }
+  .empty[hidden] { display: none; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .card-head {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .card-head h2 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 650;
+    letter-spacing: .01em;
+  }
+  .card-head .sub {
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+  }
+  .card-head .count {
+    color: var(--muted);
+    font-size: 11px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 1px 7px;
+    flex: 0 0 auto;
+  }
+  .card-head .clear {
+    padding: 3px 7px;
+    font-size: 11px;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--agent);
+    flex: 0 0 auto;
+    box-shadow: 0 0 0 3px rgba(86, 204, 242, .12);
+  }
+  .agent-card.step .dot { background: var(--tool); box-shadow: 0 0 0 3px rgba(111, 207, 151, .12); }
+  .agent-card.orchestrator .dot { background: var(--accent); box-shadow: 0 0 0 3px rgba(108, 182, 255, .12); }
+  .jobmanager-card .dot { background: var(--jobmanager); box-shadow: 0 0 0 3px rgba(255, 184, 107, .12); }
+
+  .messages {
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    overflow: auto;
+  }
+
+  .side {
+    min-height: 0;
+    display: flex;
+  }
+  .side .card { flex: 1; }
+  .side .messages { flex: 1 1 auto; }
+
+  .msg {
+    border-left: 3px solid var(--custom);
+    background: rgba(15, 23, 42, .025);
+    border-radius: 0 6px 6px 0;
+    padding: 7px 9px;
+  }
+  .msg.user { border-left-color: var(--user); }
+  .msg.agent { border-left-color: var(--agent); }
+  .msg.tool { border-left-color: var(--tool); }
+  .msg.interrupt { border-left-color: var(--interrupt); background: rgba(124, 58, 237, .06); }
+  .msg.custom { border-left-color: var(--custom); }
+  .msg.jobmanager-agent { border-left-color: var(--jobmanager); }
+  .msg.jobmanager-tool { border-left-color: var(--tool); }
+
+  .msg-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 3px;
+  }
+  .badge {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--custom);
+  }
+  .badge.user { color: var(--user); }
+  .badge.agent { color: var(--agent); }
+  .badge.tool { color: var(--tool); }
+  .badge.interrupt { color: var(--interrupt); }
+  .badge.custom { color: var(--custom); }
+  .badge.jobmanager { color: var(--jobmanager); }
+
+  .msg-head .name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--text);
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 5px;
+  }
+  .msg-head .meta {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+
+  .msg-body .text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-size: 13px;
+  }
+  .msg-body .text:empty::before { content: "(empty)"; color: var(--muted); }
+
+  pre {
+    margin: 4px 0 0;
+    padding: 7px 8px;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: auto;
+    max-height: 260px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  details {
+    margin-top: 6px;
+  }
+  details summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 11px;
+    user-select: none;
+  }
+  details summary:hover { color: var(--text); }
+
+  .interrupt-controls {
+    display: flex;
+    gap: 7px;
+    align-items: flex-start;
+    margin-top: 7px;
+    flex-wrap: wrap;
+  }
+  .interrupt-controls textarea {
+    flex: 1 1 220px;
+    min-height: 42px;
+    resize: vertical;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 8px;
+    font: inherit;
+    font-size: 12px;
+  }
+  .note {
+    color: var(--muted);
+    font-size: 12px;
+    font-style: italic;
+  }
+
+  footer {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--border);
+    background: #ffffff;
+    padding: 10px 14px 12px;
+  }
+  .composer {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+  #input {
+    flex: 1;
+    min-height: 54px;
+    max-height: 180px;
+    resize: vertical;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 9px 10px;
+    font: inherit;
+    font-size: 13px;
+  }
+  #input:focus, #threadId:focus, .interrupt-controls textarea:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, .15);
+  }
+  .composer .send {
+    background: #2563eb;
+    border-color: #1d4ed8;
+    color: #ffffff;
+    padding: 10px 18px;
+    font-weight: 650;
+  }
+  .composer .send:hover { background: #1d4ed8; }
+  .hint {
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 6px;
+  }
+
+  @media (max-width: 900px) {
+    header { flex-wrap: wrap; }
+    main {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr);
+    }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">cat-agent <span>debug console</span></div>
+    <div class="threadbar">
+      <label for="threadId">thread</label>
+      <input id="threadId" autocomplete="off" spellcheck="false" placeholder="blank = new thread">
+      <button id="useThread" type="button">Use</button>
+      <button id="newThread" type="button">New</button>
+      <button id="clearView" type="button">Clear view</button>
+      <span id="status" class="status">starting…</span>
+    </div>
+  </header>
+
+  <nav id="jumpbar" class="jumpbar" aria-label="Jump to a message container">
+    <span class="jump-label">jump</span>
+    <div id="jumpChips" class="jump-chips"></div>
+  </nav>
+
+  <main>
+    <section class="agents-pane" id="agentsPane">
+      <div id="emptyAgents" class="empty">
+        Send a message to start. Every <code>StreamPayload.source</code> gets its own card:
+        the orchestrator, each StepNode, and any other source reported by the graph.
+      </div>
+      <div id="agents"></div>
+    </section>
+
+    <aside class="side">
+      <section class="card jobmanager-card">
+        <div class="card-head">
+          <span class="dot"></span>
+          <h2>Jobmanager agent</h2>
+          <span id="jmSub" class="sub">front_end_url messages</span>
+          <span id="jmCount" class="count">0</span>
+          <button id="clearJobmanager" class="clear" type="button">clear</button>
+        </div>
+        <div id="jobmanager" class="messages"></div>
+      </section>
+    </aside>
+  </main>
+
+  <footer>
+    <div class="composer">
+      <textarea id="input" rows="3" placeholder="Message the orchestrator…"></textarea>
+      <button id="send" class="send" type="button">Send</button>
+    </div>
+    <div class="hint">Ctrl+Enter / Cmd+Enter sends. Job submissions resume automatically when jobmanager posts its callback; answer other interrupts in their card.</div>
+  </footer>
+
+<script>
+(() => {
+  "use strict";
+
+  const JOBMANAGER_SOURCE = "__jobmanager__";
+  const POLL_MS = 900;
+  const STORE_KEY = "catagent.debug.thread";
+
+  const agentsEl = document.getElementById("agents");
+  const agentsPane = document.getElementById("agentsPane");
+  const emptyAgentsEl = document.getElementById("emptyAgents");
+  const jobmanagerEl = document.getElementById("jobmanager");
+  const jmCountEl = document.getElementById("jmCount");
+  const threadInput = document.getElementById("threadId");
+  const inputEl = document.getElementById("input");
+  const statusEl = document.getElementById("status");
+  const sendBtn = document.getElementById("send");
+  const jumpChipsEl = document.getElementById("jumpChips");
+
+  const state = {
+    threadId: "",
+    lastSeq: 0,
+    jmSeq: 0,
+    cards: new Map(),
+    interrupts: new Map(),
+    polling: false,
+    pollTimer: null,
+    sending: false,
+    epoch: 0,
+    jmCount: 0,
+  };
+
+  // ---------------------------------------------------------------- utilities
+
+  function setStatus(text, kind = "") {
+    statusEl.textContent = text;
+    statusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function pretty(value) {
+    if (typeof value === "string") return value;
+    if (value === null || value === undefined) return "";
+    try { return JSON.stringify(value, null, 2); }
+    catch (_) { return String(value); }
+  }
+
+  function timeLabel() {
+    return new Date().toLocaleTimeString([], {
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+  }
+
+  function isNearBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+  }
+
+  function scrollToBottom(el) {
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function textBlock(value) {
+    const wrap = document.createElement("div");
+    wrap.className = "text";
+    if (typeof value === "string") {
+      wrap.textContent = value;
+    } else if (value === null || value === undefined) {
+      wrap.textContent = "";
+    } else {
+      const pre = document.createElement("pre");
+      pre.textContent = pretty(value);
+      wrap.append(pre);
+    }
+    return wrap;
+  }
+
+  function badge(text, kind = "") {
+    const el = document.createElement("span");
+    el.className = "badge" + (kind ? " " + kind : "");
+    el.textContent = text;
+    return el;
+  }
+
+  function meta(text) {
+    const el = document.createElement("span");
+    el.className = "meta";
+    el.textContent = text;
+    return el;
+  }
+
+  function detailsBlock(label, value) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = label;
+    const pre = document.createElement("pre");
+    pre.textContent = pretty(value);
+    details.append(summary, pre);
+    return details;
+  }
+
+  // -------------------------------------------------------------- source cards
+
+  function sourceKey(source) {
+    if (!source || source === "orchestrator" || source === state.threadId) {
+      return "orchestrator";
+    }
+    return source;
+  }
+
+  function describeSource(source) {
+    if (!source || source === "orchestrator" || source === state.threadId) {
+      return {
+        title: "Orchestrator",
+        sub: state.threadId ? "source: " + state.threadId : "source: outer graph",
+        kind: "orchestrator",
+      };
+    }
+    const prefix = state.threadId ? state.threadId + ":" : "";
+    if (prefix && source.startsWith(prefix)) {
+      return {
+        title: "StepNode",
+        sub: "step: " + source.slice(prefix.length),
+        kind: "step",
+      };
+    }
+    return { title: "Agent", sub: "source: " + source, kind: "agent" };
+  }
+
+  function updateEmpty() {
+    emptyAgentsEl.hidden = state.cards.size > 0;
+  }
+
+  // -------------------------------------------------------------- jump bar
+
+  function prefersReducedMotion() {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function flashCard(el) {
+    el.classList.remove("flash");
+    void el.offsetWidth;
+    el.classList.add("flash");
+    window.setTimeout(() => el.classList.remove("flash"), 1300);
+  }
+
+  function jumpToCard(card) {
+    card.el.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "start",
+      inline: "nearest",
+    });
+    flashCard(card.el);
+  }
+
+  function jumpToJobmanager() {
+    const card = document.querySelector(".jobmanager-card");
+    if (!card) return;
+    card.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
+    flashCard(card);
+  }
+
+  function makeJumpChip({ key, label, title, kind, count, onJump }) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "jump-chip " + kind;
+    btn.dataset.key = key;
+    btn.title = title;
+
+    const dot = document.createElement("span");
+    dot.className = "chip-dot";
+
+    const text = document.createElement("span");
+    text.className = "chip-text";
+    text.textContent = label;
+
+    btn.append(dot, text);
+
+    if (count !== undefined) {
+      const countEl = document.createElement("span");
+      countEl.className = "chip-count";
+      countEl.textContent = String(count);
+      btn.append(countEl);
+    }
+
+    btn.addEventListener("click", onJump);
+    return btn;
+  }
+
+  function updateJumpbar() {
+    const chips = [];
+
+    for (const el of Array.from(agentsEl.children)) {
+      const key = el.dataset.source;
+      const card = state.cards.get(key);
+      if (!card) continue;
+
+      const info = card.info;
+      let label;
+      if (info.kind === "orchestrator") {
+        label = "Orchestrator";
+      } else if (info.kind === "step") {
+        label = "StepNode · " + info.sub.replace(/^step:\s*/, "");
+      } else {
+        label = info.title + " · " + info.sub.replace(/^source:\s*/, "");
+      }
+
+      chips.push(makeJumpChip({
+        key,
+        label,
+        title: info.sub,
+        kind: info.kind,
+        count: card.countValue,
+        onJump: () => jumpToCard(card),
+      }));
+    }
+
+    chips.push(makeJumpChip({
+      key: JOBMANAGER_SOURCE,
+      label: "Jobmanager",
+      title: "Jobmanager agent progress",
+      kind: "jobmanager",
+      count: state.jmCount,
+      onJump: jumpToJobmanager,
+    }));
+
+    jumpChipsEl.replaceChildren(...chips);
+  }
+
+  function updateJumpCount(key, value) {
+    for (const chip of jumpChipsEl.querySelectorAll(".jump-chip")) {
+      if (chip.dataset.key !== key) continue;
+      const countEl = chip.querySelector(".chip-count");
+      if (countEl) countEl.textContent = String(value);
+      return;
+    }
+  }
+
+  function cardFor(source) {
+    const key = sourceKey(source);
+    let card = state.cards.get(key);
+    if (card) return card;
+
+    const info = describeSource(source);
+    const el = document.createElement("article");
+    el.className = "card agent-card " + info.kind;
+    el.dataset.source = key;
+
+    const head = document.createElement("div");
+    head.className = "card-head";
+
+    const dot = document.createElement("span");
+    dot.className = "dot";
+
+    const title = document.createElement("h2");
+    title.textContent = info.title;
+    title.title = source || key;
+
+    const sub = document.createElement("span");
+    sub.className = "sub";
+    sub.textContent = info.sub;
+    sub.title = info.sub;
+
+    const count = document.createElement("span");
+    count.className = "count";
+    count.textContent = "0";
+
+    head.append(dot, title, sub, count);
+
+    const messages = document.createElement("div");
+    messages.className = "messages";
+
+    el.append(head, messages);
+
+    // Keep the orchestrator first even if a step card arrives first.
+    if (key === "orchestrator") {
+      agentsEl.prepend(el);
+    } else {
+      agentsEl.append(el);
+    }
+
+    card = { key, el, messages, count, countEl: count, countValue: 0, info };
+    state.cards.set(key, card);
+    updateEmpty();
+    updateJumpbar();
+    return card;
+  }
+
+  function addToCard(card, payload) {
+    card.messages.append(buildMessage(payload));
+    card.countValue += 1;
+    card.countEl.textContent = String(card.countValue);
+    updateJumpCount(card.key, card.countValue);
+    if (isNearBottom(agentsPane)) scrollToBottom(agentsPane);
+  }
+
+  function addLocalUser(text) {
+    const payload = {
+      type: "user",
+      message: text,
+      source: state.threadId || null,
+      message_id: "local-" + Date.now(),
+      local: true,
+    };
+    const card = cardFor(state.threadId || null);
+    addToCard(card, payload);
+  }
+
+  // ---------------------------------------------------------------- rendering
+
+  function buildMessage(payload) {
+    const kind = payload.type || "custom";
+    const el = document.createElement("div");
+    el.className = "msg " + kind;
+
+    const head = document.createElement("div");
+    head.className = "msg-head";
+    head.append(badge(kind, kind));
+
+    if (kind === "tool" && payload.tool_call_name) {
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = payload.tool_call_name;
+      head.append(name);
+    }
+
+    head.append(meta(payload.local ? "you · just now" : timeLabel()));
+    el.append(head);
+
+    const body = document.createElement("div");
+    body.className = "msg-body";
+
+    if (kind === "interrupt") {
+      const pre = document.createElement("pre");
+      pre.textContent = pretty(payload.message);
+      body.append(pre);
+      const controls = interruptControls(payload);
+      if (controls) body.append(controls);
+    } else {
+      body.append(textBlock(payload.message));
+    }
+
+    el.append(body);
+
+    if (kind === "agent" && Array.isArray(payload.tool_calls) && payload.tool_calls.length) {
+      el.append(detailsBlock("tool calls (" + payload.tool_calls.length + ")", payload.tool_calls));
+    }
+    if (kind === "tool" && payload.tool_call_id) {
+      el.title = "tool_call_id: " + payload.tool_call_id;
+    }
+    return el;
+  }
+
+  function interruptControls(payload) {
+    const value = payload.message;
+    const kind = value && typeof value === "object" && !Array.isArray(value)
+      ? value.kind
+      : null;
+
+    const wrap = document.createElement("div");
+    wrap.className = "interrupt-controls";
+
+    if (kind === "JobSubmission") {
+      const job = value && value.payload && value.payload.job_uuid
+        ? " (" + value.payload.job_uuid + ")"
+        : "";
+      const note = document.createElement("div");
+      note.className = "note";
+      note.textContent = "Automatic: jobmanager resumes this interrupt" + job + ".";
+      wrap.append(note);
+      return wrap;
+    }
+
+    if (!payload.interrupt_id) return null;
+    if (state.interrupts.get(payload.interrupt_id) === "answered") {
+      const note = document.createElement("div");
+      note.className = "note";
+      note.textContent = "Answer sent.";
+      wrap.append(note);
+      return wrap;
+    }
+
+    const ta = document.createElement("textarea");
+    ta.rows = 2;
+    ta.placeholder = "Answer as JSON or free text";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Resume";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      ta.disabled = true;
+      try {
+        const response = parseResume(ta.value, kind);
+        await sendResume(payload.interrupt_id, response);
+        state.interrupts.set(payload.interrupt_id, "answered");
+        const note = document.createElement("div");
+        note.className = "note";
+        note.textContent = "Answer sent.";
+        wrap.replaceChildren(note);
+      } catch (err) {
+        btn.disabled = false;
+        ta.disabled = false;
+        setStatus("resume error: " + err.message, "err");
+      }
+    });
+
+    wrap.append(ta, btn);
+    return wrap;
+  }
+
+  function parseResume(raw, kind) {
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch (_) { parsed = raw; }
+    if (typeof parsed !== "string") return parsed;
+    if (kind === "AgentInterrupt") return { payload: { result: parsed } };
+    if (kind === "AskForArgs") return { payload: { command: "edit", message: parsed } };
+    return parsed;
+  }
+
+  function renderEvent(event) {
+    const payload = event.payload || {};
+    if (payload.type === "jobmanager") {
+      renderJobmanager(payload);
+      return;
+    }
+
+    const card = cardFor(payload.source || state.threadId || null);
+    addToCard(card, payload);
+
+    if (payload.type === "interrupt" && payload.interrupt_id) {
+      if (!state.interrupts.has(payload.interrupt_id)) {
+        state.interrupts.set(payload.interrupt_id, "pending");
+      }
+    }
+  }
+
+  function renderJobmanager(payload) {
+    const role = payload.role === "tool" ? "tool" : "agent";
+    const el = document.createElement("div");
+    el.className = "msg jobmanager-" + role;
+
+    const head = document.createElement("div");
+    head.className = "msg-head";
+    head.append(badge("jobmanager", "jobmanager"));
+    head.append(badge(role, role));
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = role;
+    head.append(name);
+
+    if (payload.phase) {
+      const phase = document.createElement("span");
+      phase.className = "name";
+      phase.textContent = payload.phase;
+      head.append(phase);
+    }
+
+    head.append(meta(timeLabel()));
+    el.append(head);
+
+    const body = document.createElement("div");
+    body.className = "msg-body";
+    body.append(textBlock(payload.message));
+    el.append(body);
+
+    if (payload.tool_calls) {
+      el.append(detailsBlock("tool calls", payload.tool_calls));
+    }
+
+    const near = isNearBottom(jobmanagerEl);
+    jobmanagerEl.append(el);
+    state.jmCount += 1;
+    jmCountEl.textContent = String(state.jmCount);
+    updateJumpCount(JOBMANAGER_SOURCE, state.jmCount);
+    if (near) scrollToBottom(jobmanagerEl);
+  }
+
+  // ------------------------------------------------------------------ polling
+
+  async function pollThread() {
+    const tid = state.threadId;
+    if (!tid) return;
+    const epoch = state.epoch;
+    const after = state.lastSeq;
+    const response = await fetch(
+      "/events/" + encodeURIComponent(tid) + "?after=" + after,
+      { cache: "no-store" },
+    );
+    if (!response.ok) throw new Error("events HTTP " + response.status);
+    const data = await response.json();
+    if (tid !== state.threadId || epoch !== state.epoch) return;  // view reset
+    for (const event of data.events || []) {
+      if (event.seq <= state.lastSeq) continue;
+      state.lastSeq = event.seq;
+      renderEvent(event);
+    }
+  }
+
+  async function pollJobmanager() {
+    const response = await fetch(
+      "/events/" + encodeURIComponent(JOBMANAGER_SOURCE) + "?after=" + state.jmSeq,
+      { cache: "no-store" },
+    );
+    if (!response.ok) return;
+    const data = await response.json();
+    for (const event of data.events || []) {
+      if (event.seq <= state.jmSeq) continue;
+      state.jmSeq = event.seq;
+      renderJobmanager(event.payload || {});
+    }
+  }
+
+  function schedulePoll(delay = POLL_MS) {
+    if (state.pollTimer) clearTimeout(state.pollTimer);
+    state.pollTimer = setTimeout(pollLoop, delay);
+  }
+
+  async function pollLoop() {
+    if (state.polling) return;
+    state.polling = true;
+    try {
+      await pollThread();
+      await pollJobmanager();
+      if (!state.sending) {
+        if (state.threadId) setStatus("live · " + state.threadId, "ok");
+        else setStatus("live · new thread", "ok");
+      }
+    } catch (err) {
+      if (!state.sending) setStatus("poll error: " + err.message, "err");
+    } finally {
+      state.polling = false;
+      schedulePoll();
+    }
+  }
+
+  // ------------------------------------------------------------------ actions
+
+  function resetView() {
+    state.epoch += 1;
+    state.lastSeq = 0;
+    state.cards.clear();
+    state.interrupts.clear();
+    agentsEl.replaceChildren();
+    updateEmpty();
+    updateJumpbar();
+  }
+
+  function setThread(tid) {
+    if (!tid || tid === state.threadId) return;
+    state.threadId = tid;
+    threadInput.value = tid;
+    try { localStorage.setItem(STORE_KEY, tid); } catch (_) {}
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread", tid);
+    history.replaceState(null, "", url.toString());
+    resetView();
+    setStatus("thread " + tid, "ok");
+    schedulePoll(0);
+  }
+
+  function useThread() {
+    const tid = threadInput.value.trim();
+    if (!tid) {
+      newThread();
+      return;
+    }
+    if (tid === state.threadId) {
+      resetView();
+      schedulePoll(0);
+      return;
+    }
+    setThread(tid);
+  }
+
+  function newThread() {
+    state.threadId = "";
+    threadInput.value = "";
+    try { localStorage.removeItem(STORE_KEY); } catch (_) {}
+    const url = new URL(window.location.href);
+    url.searchParams.delete("thread");
+    history.replaceState(null, "", url.toString());
+    resetView();
+    setStatus("live · new thread", "ok");
+  }
+
+  function clearView() {
+    state.cards.clear();
+    state.interrupts.clear();
+    agentsEl.replaceChildren();
+    updateEmpty();
+    updateJumpbar();
+  }
+
+  async function postChat(body, options = {}) {
+    state.sending = true;
+    sendBtn.disabled = true;
+    setStatus("sending…", "busy");
+    try {
+      const response = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error("HTTP " + response.status + (detail ? ": " + detail : ""));
+      }
+
+      const tid = response.headers.get("X-Thread-Id");
+      if (tid) setThread(tid);
+
+      if (options.userText) addLocalUser(options.userText);
+
+      // Polling renders the events; this only keeps the SSE response flowing
+      // so an unread body cannot back-pressure the server-side generator.
+      response.text()
+        .then(() => {
+          state.sending = false;
+          sendBtn.disabled = false;
+          setStatus("live · " + (state.threadId || "new thread"), "ok");
+        })
+        .catch((err) => {
+          state.sending = false;
+          sendBtn.disabled = false;
+          setStatus("stream error: " + err.message, "err");
+        });
+    } catch (err) {
+      state.sending = false;
+      sendBtn.disabled = false;
+      throw err;
+    }
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value;
+    if (!text.trim()) {
+      inputEl.focus();
+      return;
+    }
+    inputEl.value = "";
+    const body = { message: text, register_jobs: true };
+    if (state.threadId) body.thread_id = state.threadId;
+    try {
+      await postChat(body, { userText: text });
+    } catch (err) {
+      inputEl.value = text;
+      setStatus("send error: " + err.message, "err");
+    }
+  }
+
+  async function sendResume(interruptId, response) {
+    if (!state.threadId) throw new Error("no thread id");
+    await postChat({
+      thread_id: state.threadId,
+      interrupt_id: interruptId,
+      interrupt_resume: response,
+    });
+  }
+
+  // -------------------------------------------------------------------- wiring
+
+  sendBtn.addEventListener("click", sendMessage);
+
+  inputEl.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      sendMessage();
+    }
+  });
+
+  document.getElementById("useThread").addEventListener("click", useThread);
+  document.getElementById("newThread").addEventListener("click", newThread);
+  document.getElementById("clearView").addEventListener("click", clearView);
+  document.getElementById("clearJobmanager").addEventListener("click", () => {
+    jobmanagerEl.replaceChildren();
+    state.jmCount = 0;
+    jmCountEl.textContent = "0";
+    updateJumpCount(JOBMANAGER_SOURCE, 0);
+  });
+  threadInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      useThread();
+    }
+  });
+
+  const params = new URLSearchParams(window.location.search);
+  let initial = params.get("thread") || "";
+  if (!initial) {
+    try { initial = localStorage.getItem(STORE_KEY) || ""; } catch (_) {}
+  }
+  if (initial) {
+    state.threadId = initial;
+    threadInput.value = initial;
+  }
+
+  updateEmpty();
+  updateJumpbar();
+  schedulePoll(0);
+})();
+</script>
+</body>
+</html>

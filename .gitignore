@@ -1,0 +1,6 @@
+recycle
+*.pyc
+__pycache__/
+.env
+check/.tmp/
+ai-changes

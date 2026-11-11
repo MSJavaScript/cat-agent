@@ -1,0 +1,29 @@
+{
+    "db_path": "/mnt/t/programming/myagents/cat-agent-dev/check/.tmp/jobmanager_test.db",
+    "callback_url": "http://127.0.0.1:5600",
+    "poll_interval": 1,
+    "retry_job_download": [1, 2],
+    "retry_callback": [1, 2],
+    "n_retry_get_status": 2,
+    "n_retry_job_submit": 1,
+    "providers": {
+        "local-mock": {
+            "type": "local",
+            "processing_units": ["cpu"],
+            "resources": [],
+            "job_envs": {
+                "mock-compute": {
+                    "softwares": [
+                        "mock-prepare",
+                        "mock-relax",
+                        "mock-analyze",
+                        "mock-report (sleep-based fake software)"
+                    ],
+                    "initialize_command": [
+                        "export PATH=/mnt/t/programming/myagents/cat-agent-dev/check/mock_software/bin:${PATH}"
+                    ]
+                }
+            }
+        }
+    }
+}
