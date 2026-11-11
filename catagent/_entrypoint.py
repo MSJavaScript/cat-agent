@@ -16,6 +16,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = _build_command_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    if args.command == "jobmanager":
+        from .jobmanager.server import run as run_jobmanager
+
+        run_jobmanager(
+            setting=args.setting,
+            host=args.host,
+            port=args.port,
+            log=args.log,
+            level=args.level,
+        )
+        return
+
     # ``server`` is the only mode with a listening socket; ``cli`` is the
     # default in-process mode.  Keep ``--serve`` semantics for run_server().
     args.serve = args.command == "server"

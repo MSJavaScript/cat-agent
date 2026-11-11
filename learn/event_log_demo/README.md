@@ -71,7 +71,7 @@ The status line shows exactly what the page knows:
 | `POST /chat` | `catagent/app/service.py` → `chat()` + `_stream_chat()` |
 | `GET /events/{thread_id}` | `service.py` → `events_route()` |
 | `POST /jobmanager/messages` | `service.py` → `jobmanager_messages()` |
-| `POST /callback/{thread_id}` | `JobManager._deliver_callback()` in `jobmanager/manager.py` |
+| `POST /callback/{thread_id}` | `JobManager._deliver_callback()` in `catagent/jobmanager/manager.py` |
 | polling + reset detection | `pollThread()` / `pollJobmanager()` / `serverResetRequired()` in `catagent/app/debug_ui.html` |
 
 `/events` is a debug convenience only. Real API consumers read the SSE stream

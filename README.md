@@ -24,11 +24,18 @@ invariants you must preserve when changing the code.
 ```
 
 The script installs the dependencies declared in `pyproject.toml` and a
-`catagent` console script. Only runtime files are installed: the development
-directories (`ai-changes/`, `check/`, `learn/`, `recycle/`), `jobmanager/demo/`,
-all `.env` files and `jobmanager/jobmanager_config.json` are excluded.
+`catagent` console script. Everything runtime-related is a single installable
+package: after installation, the interpreter's site-packages contains only
+`catagent/`, with `jobmanager`, `tools`, `libs` and `skills` nested inside it.
+
+Only runtime files are installed: the development directories
+(`ai-changes/`, `check/`, `learn/`, `recycle/`),
+`catagent/jobmanager/demo/`, all `.env` files and
+`catagent/jobmanager/jobmanager_config.json` are excluded.
 Jobmanager configuration and model credentials are therefore always supplied by
-the user.
+the user. If an older version left top-level `jobmanager/`, `skills/`, `tools/`
+or `libs/` modules behind, the installer removes them when they carry this
+project's marker files.
 
 The skills directory is part of the package, so `--skill-index-json` is
 optional. Override it with the flag or with `CATAGENT_SKILL_INDEX` when using a
@@ -48,7 +55,7 @@ different skill set.
 # API_KEY=...
 
 # 3. Optional: start the job manager for real job submission
-python -m jobmanager.server \
+catagent jobmanager \
     --setting /path/to/jobmanager_config.json \
     --host 127.0.0.1 --port 8000 --log jobmanager.log
 
@@ -100,16 +107,27 @@ catagent/
 │   ├── init_tools.py         Static tool registry + job/interrupt tools.
 │   ├── models.py             StepNodeState, StepResult and interrupt models.
 │   └── skill_tool.py         Skill lookup for a running step.
-└── system_skills/            System prompts injected into the agents.
+├── system_skills/            System prompts injected into the agents.
+├── jobmanager/               Job submission service (also `catagent jobmanager`).
+│   ├── server.py             FastAPI backend and `run()`.
+│   ├── manager.py, db.py     Submission lifecycle, retries and durable state.
+│   ├── providers/            bohr / slurm / local / paracloud backends.
+│   ├── agent/                Job-checking agent and its skill.
+│   └── demo/                 Development demo (not installed).
+├── tools/                    Computation/shell tools used by agents.
+├── libs/nebkit/              Vendored NEB/reaction-network library.
+└── skills/                   Scientific skills shipped with the package.
 
-jobmanager/                   Independent HTTP job submission service.
-tools/                        Computation/shell tools used by agents.
-skills/                       Scientific skills shipped with the package.
 check/                        Fast deterministic tests + full e2e test harness.
 learn/                        Self-contained runnable demos of internal mechanisms.
 install.sh                    Installs dependencies and the `catagent` command.
-pyproject.toml, MANIFEST.in   Packaging: runtime files only, dev dirs excluded.
+pyproject.toml, MANIFEST.in   Packaging: one `catagent` package, dev dirs excluded.
 ```
+
+Everything runtime-related lives under the single `catagent/` package, so an
+installation creates exactly one importable tree. The only top-level entries
+outside it are development material (`check/`, `learn/`, `ai-changes/`,
+`recycle/`) and packaging files.
 
 `catagent/app.py` used to be one large module. It is now the `catagent/app`
 package; `catagent/app/__init__.py` re-exports the historical names so existing
@@ -283,15 +301,15 @@ Registering both would resume a job twice.
 
 ### Skills and tools
 
-- The application requires `--skill-index-json` (for example
-  `skills/skill_index.json`). `catagent/app/skills.py` loads it and seeds every
-  new thread's `loaded_skills`; the graph initializer only fills the field when
-  a thread does not already have skills, so a later
+- The application resolves the bundled index automatically
+  (`catagent/skills/skill_index.json`). `catagent/app/skills.py` loads it and
+  seeds every new thread's `loaded_skills`; the graph initializer only fills the
+  field when a thread does not already have skills, so a later
   `load_skill_from_filesystem` call is never overwritten.
-- `skills/skill_index.json` lists the available skills: a JSON array of
-  `{name, path, summary, references, scripts}` objects. If the recorded
-  checkout no longer exists, paths are remapped next to the index file
-  (`skills/<name>/skill.md` and its `references/` / `scripts/` files).
+- `catagent/skills/skill_index.json` lists the available skills: a JSON array of
+  `{name, path, summary, references, scripts}` objects. Paths are relative to
+  the index file (`dpa4/skill.md`, `dpa4/scripts/...`). Absolute paths from an
+  older checkout are still accepted and remapped next to the index file.
 - The orchestrator can also load a skill at runtime with
   `load_skill_from_filesystem`, summarize it, and store `SkillMetadata` in
   `loaded_skills`.
@@ -301,9 +319,10 @@ Registering both would resume a job twice.
   `load_skill_from_filesystem` are shortened to their first 100 characters in
   the **streamed payload** only. The full `ToolMessage` still reaches the model
   and stays in graph state; this keeps chat transcripts readable.
-- `tools/` contains shell, file-editing, structure, NEB, and INCAR helpers.
-  `catagent/stepnode/init_tools.py` builds the static tool registry and the
-  job-related tools. Tool collections can be enabled at runtime by the StepNode.
+- `catagent/tools/` contains shell, file-editing, structure, NEB, and INCAR
+  helpers. `catagent/stepnode/init_tools.py` builds the static tool registry and
+  the job-related tools. Tool collections can be enabled at runtime by the
+  StepNode.
 
 ---
 
@@ -410,12 +429,13 @@ respectively. `catagent/app/runtime.py` builds the model, the SQLite
 checkpointer, and the compiled graph from these values.
 
 The test helper in `check/common.py` additionally looks for
-`/home/luandong/bin/.env` and `jobmanager/.env`.
+`/home/luandong/bin/.env` and `catagent/jobmanager/.env`.
 
 ### Skill index
 
-`--skill-index-json` is required by `catagent.app`. Point it at a JSON array
-such as `skills/skill_index.json`:
+`--skill-index-json` is optional: by default `catagent` uses the bundled
+`catagent/skills/skill_index.json`. Pass the flag (or set
+`CATAGENT_SKILL_INDEX`) to use a different JSON array:
 
 ```json
 [
@@ -429,24 +449,29 @@ such as `skills/skill_index.json`:
 ]
 ```
 
-Paths may be absolute, relative to the index file, or use the standard
-`skills/<name>/skill.md` layout next to the index. The loader verifies each
-`skill.md` exists and remaps stale absolute paths to `skills/<name>/` next to
-the index. The resulting metadata is available to
+Paths may be absolute, relative to the index file, or relative to the skill
+directory. The loader verifies each `skill.md` exists and remaps stale absolute
+paths next to the index. The bundled index uses index-relative paths
+(`dpa4/skill.md`, `dpa4/references/...`, `dpa4/scripts/...`), so it works from
+any checkout or installation directory. The resulting metadata is available to
 `get_skill_summaries` / `get_skill_content` in the first orchestrator turn.
 
 ### Jobmanager
 
-The jobmanager has its own `.env` and `jobmanager_config.json`. See
-[jobmanager/README.md](jobmanager/README.md) for providers, callbacks, retries,
-crash recovery, and the demo. Start it with:
+The jobmanager has its own `.env` and `jobmanager_config.json` under
+`catagent/jobmanager/`. See
+[catagent/jobmanager/README.md](catagent/jobmanager/README.md) for providers,
+callbacks, retries, crash recovery, and the demo. Start it with:
 
 ```bash
-python -m jobmanager.server \
-    --setting jobmanager/jobmanager_config.json \
+catagent jobmanager \
+    --setting catagent/jobmanager/jobmanager_config.json \
     --host 127.0.0.1 --port 8000 \
     --log jobmanager.log --level info
 ```
+
+`python -m catagent.jobmanager.server` accepts the same options and remains
+available for scripts.
 
 ---
 

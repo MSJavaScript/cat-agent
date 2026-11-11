@@ -37,7 +37,10 @@ def main() -> None:
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-    log_path = os.path.splitext(args.output)[0] + ".log"
+    # The skill documents ``relax_<sample>.log`` (for example relax_A.log),
+    # not a log named after the --output stem.
+    log_name = f"relax_{sample}.log"
+    log_path = os.path.join(os.path.dirname(os.path.abspath(args.output)), log_name)
     with open(log_path, "w", encoding="utf-8") as f:
         f.write(f"mock-relax finished for sample {sample}\n")
         f.write(f"energy = {data['energy']}\n")

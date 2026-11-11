@@ -1,18 +1,15 @@
 # Only runtime files are shipped.  Everything below is either development
 # material or configuration that the user must provide.
+recursive-include catagent *
+
+# Prune after the recursive include: later rules win in MANIFEST.in.
+prune catagent/jobmanager/demo
 prune ai-changes
 prune check
 prune learn
 prune recycle
-prune jobmanager/demo
 
-recursive-include catagent *.md *.html
-recursive-include jobmanager *.md
-recursive-include skills *
-recursive-include tools *
-recursive-include libs *
-
-exclude jobmanager/jobmanager_config.json
+exclude catagent/jobmanager/jobmanager_config.json
 global-exclude .env .env.*
 global-exclude *.py[cod]
 global-exclude __pycache__/*

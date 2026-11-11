@@ -26,7 +26,7 @@ def _resolve_skill_path(
     Index files are often generated on one machine and reused on another.  If
     the recorded absolute path does not exist, fall back to
     ``<index_dir>/<name>/skill.md``; that is the layout used by this repository
-    (``skills/<name>/skill.md``).
+    (``catagent/skills/<name>/skill.md``).
     """
     path = _expand(declared)
     if not path.is_absolute():
@@ -51,6 +51,7 @@ def _resolve_skill_path(
 def _resolve_artifact(
     artifact: Any,
     *,
+    index_dir: Path,
     skill_path: Path,
     old_skill_dir: Path | None,
 ) -> SkillArtifact:
@@ -60,27 +61,35 @@ def _resolve_artifact(
 
     declared = str(artifact.get("path", ""))
     purpose = str(artifact.get("purpose", ""))
-    path = _expand(declared)
-    if not path.is_absolute() and old_skill_dir is not None:
-        path = old_skill_dir / path
+    raw = _expand(declared)
+    skill_dir = skill_path.parent
+
+    if raw.is_absolute():
+        path = raw
+    else:
+        # Relative paths in the index are relative to the index file itself,
+        # matching the ``path`` field (``<skill>/skill.md``).  As a convenience,
+        # also accept paths relative to the individual skill directory.
+        path = index_dir / raw
+        if not path.is_file():
+            path = skill_dir / raw
 
     if path.is_file():
         resolved = path.resolve()
     else:
         # Preserve the subdirectory (references/ or scripts/) but replace the
         # stale checkout prefix with the actual skill directory.
-        skill_dir = skill_path.parent
         candidates = []
         if old_skill_dir is not None:
             try:
-                candidates.append(skill_dir / path.relative_to(old_skill_dir))
+                candidates.append(skill_dir / raw.relative_to(old_skill_dir))
             except ValueError:
                 pass
         candidates.extend(
             [
-                skill_dir / path.name,
-                skill_dir / "references" / path.name,
-                skill_dir / "scripts" / path.name,
+                skill_dir / raw.name,
+                skill_dir / "references" / raw.name,
+                skill_dir / "scripts" / raw.name,
             ]
         )
         resolved = next(
@@ -94,6 +103,7 @@ def _resolve_artifact(
 def _artifacts(
     values: Any,
     *,
+    index_dir: Path,
     skill_path: Path,
     old_skill_dir: Path | None,
 ) -> list[SkillArtifact]:
@@ -102,7 +112,12 @@ def _artifacts(
     if not isinstance(values, (list, tuple)):
         raise ValueError("Skill references/scripts must be a list.")
     return [
-        _resolve_artifact(item, skill_path=skill_path, old_skill_dir=old_skill_dir)
+        _resolve_artifact(
+            item,
+            index_dir=index_dir,
+            skill_path=skill_path,
+            old_skill_dir=old_skill_dir,
+        )
         for item in values
     ]
 
@@ -111,10 +126,10 @@ def load_skill_index(path: str) -> Dict[str, SkillMetadata]:
     """Read ``skill_index_json`` and return ``{name: SkillMetadata}``.
 
     The file must contain a JSON array.  Each entry has the same shape as
-    ``skills/skill_index.json``: ``name``, ``path``, ``summary``, ``references``
-    and ``scripts``.  Paths are resolved against the index location when the
-    recorded checkout no longer exists, so an index from another machine still
-    works as long as the skills sit next to it.
+    ``catagent/skills/skill_index.json``: ``name``, ``path``, ``summary``,
+    ``references`` and ``scripts``.  Paths are resolved against the index
+    location when the recorded checkout no longer exists, so an index from
+    another machine still works as long as the skills sit next to it.
     """
     index_path = _expand(path)
     if not index_path.is_file():
@@ -143,18 +158,21 @@ def load_skill_index(path: str) -> Dict[str, SkillMetadata]:
             index_dir=index_dir,
             name=name,
         )
-        old_skill_dir = _expand(declared_path).parent
+        declared = _expand(declared_path)
+        old_skill_dir = declared.parent if declared.is_absolute() else None
         skills[name] = SkillMetadata(
             name=name,
             path=str(skill_path),
             summary=str(entry.get("summary") or ""),
             references=_artifacts(
                 entry.get("references"),
+                index_dir=index_dir,
                 skill_path=skill_path,
                 old_skill_dir=old_skill_dir,
             ),
             scripts=_artifacts(
                 entry.get("scripts"),
+                index_dir=index_dir,
                 skill_path=skill_path,
                 old_skill_dir=old_skill_dir,
             ),

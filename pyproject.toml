@@ -28,9 +28,9 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["catagent*", "jobmanager*", "tools*", "libs*", "skills*"]
+include = ["catagent*"]
 exclude = [
-    "jobmanager.demo*",
+    "catagent.jobmanager.demo*",
     "check*",
     "learn*",
     "ai-changes*",
@@ -41,4 +41,10 @@ exclude = [
 
 [tool.setuptools.package-data]
 catagent = ["system_skills/*.md", "app/debug_ui.html"]
-jobmanager = ["agent/*.md"]
+"catagent.jobmanager" = ["agent/*.md", "README.md"]
+"catagent.skills" = [
+    "skill_index.json",
+    "*/*.md",
+    "*/*/*.md",
+    "*/*/*.py",
+]

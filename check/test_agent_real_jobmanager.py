@@ -62,8 +62,8 @@ from catagent.stepnode.stepnode import create_stepnode_agent
 from check.common import REPO_ROOT, load_env, make_model
 
 TEST_CASES = Path("/mnt/t/workdir/agent_test/case0/test_cases")
-BASE_CONFIG = REPO_ROOT / "jobmanager" / "jobmanager_config.json"
-SKILL_INDEX = REPO_ROOT / "skills" / "skill_index.json"
+BASE_CONFIG = REPO_ROOT / "catagent" / "jobmanager" / "jobmanager_config.json"
+SKILL_INDEX = REPO_ROOT / "catagent" / "skills" / "skill_index.json"
 PYTHON = "/mnt/t/softwares_install/lang-graph/bin/python3"
 EXPECTED_ARTIFACTS = ("OUTCAR", "CONTCAR", "vasp.stdout")
 
@@ -271,7 +271,7 @@ def start_jobmanager(config_path: Path, port: int,
     env["PATH"] = f"{venv_bin}{os.pathsep}{env.get('PATH', '')}"
     env["PYTHONUNBUFFERED"] = "1"
     proc = subprocess.Popen(
-        [sys.executable, "-m", "jobmanager.server",
+        [sys.executable, "-m", "catagent.jobmanager.server",
          "--setting", str(config_path),
          "--host", "127.0.0.1",
          "--port", str(port),
@@ -651,7 +651,7 @@ async def run_all(args: argparse.Namespace) -> None:
 
     load_env()
     if not os.getenv("MODEL_NAME"):
-        raise RuntimeError("MODEL_NAME is not set; check jobmanager/.env")
+        raise RuntimeError("MODEL_NAME is not set; check catagent/jobmanager/.env")
 
     broker = CallbackBroker()
     callback = CallbackServer(broker)
