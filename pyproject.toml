@@ -1,6 +1,12 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "cat-agent"
 version = "0.0.1"
+description = "An agent for computational catalysis."
+requires-python = ">=3.10"
 dependencies = [
     "langgraph==1.2.11",
     "langchain==1.3.15",
@@ -13,3 +19,26 @@ dependencies = [
     "aiosqlite",
     "paramiko"
 ]
+
+[project.scripts]
+catagent = "catagent._entrypoint:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["catagent*", "jobmanager*", "tools*", "libs*", "skills*"]
+exclude = [
+    "jobmanager.demo*",
+    "check*",
+    "learn*",
+    "ai-changes*",
+    "recycle*",
+    "__pycache__*",
+    "*.__pycache__*",
+]
+
+[tool.setuptools.package-data]
+catagent = ["system_skills/*.md", "app/debug_ui.html"]
+jobmanager = ["agent/*.md"]
