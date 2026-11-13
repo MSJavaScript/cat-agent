@@ -341,6 +341,7 @@ def create_catagent(model:BaseChatModel,
 
     async def orchestrator_request_queue_node(state:WorkflowState,
                                                config:RunnableConfig):
+        logger.info("orchestrator_request_queue_node")
         thread_id = config["configurable"]["thread_id"]
         orchestrator_lock, orchestrator_claimed = get_orchestrator_sync(thread_id)
         # A request may only be dispatched when the orchestrator of *this*

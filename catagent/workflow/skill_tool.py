@@ -6,60 +6,67 @@ from typing import Dict
 import os
 from .models import SkillSummaryOutput, SkillArtifact, SkillMetadata
 
+@tool 
+def get_skill_summaries(runtime:ToolRuntime):
+    '''
+    Return a dict containing the all the summaries of available skills.
+    Returns:
+        A dict. Key is the skill name, value is the summary of skill.
+    ''' 
+    loaded_skills:Dict[str, SkillMetadata] = runtime.state["loaded_skills"]
+
+    result = dict()
+    for key in loaded_skills.keys():
+        script_content = ""
+        for script in loaded_skills[key]["scripts"]:
+            script_content += f"|{script['path']}|{script['purpose']}|\n"
+        if len(script_content) > 0:
+            script_content = 'Available scripts:\n|Name|Purpose|\n|---|---|\n'+script_content
+
+        result[key] = f"Summary:{loaded_skills[key]["summary"]}\n\n{script_content}"
+
+    return result
+
+
+@tool 
+def get_skill_content(skill_name:str, runtime:ToolRuntime) -> dict:
+    """
+    Get the detailed content of skill by `skill_name`.
+    Args:
+        skill_name(str): Name of skill.
+    Returns:
+        A dict containing the following keys:
+        - content: Full text content of the skill.
+        - references: Related reference files of the skill.
+        - scripts: Related scripts of the skill.
+    """
+    loaded_skills:Dict[str, SkillMetadata] = runtime.state["loaded_skills"]
+    if not skill_name in loaded_skills:
+        raise KeyError(f"Skill \"{skill_name}\" dose not exist.")
+
+    content = ""
+    with open(loaded_skills[skill_name]["path"], mode="r") as f:
+        lines = f.readlines()
+        content = "".join(lines)
+
+    if len(content) == 0:
+        raise RuntimeError("The content of skill.md is empty.")
+
+    if loaded_skills[skill_name]["references"]:
+        references = loaded_skills[skill_name]["references"]
+    else:
+        references = []
+
+
+    if loaded_skills[skill_name]["scripts"]:
+        scripts = loaded_skills[skill_name]["scripts"]
+    else:
+        scripts = []
+
+    return { "content": content, "references": references, "scripts": scripts }
 
 # Skill管理的相关工具，加载skill，读取文件系统的某个skill
-def init_skill_tools(model:BaseChatModel):
-
-    @tool 
-    def get_skill_summaries(runtime:ToolRuntime):
-        '''
-        Return a dict containing the all the summaries of available skills.
-        Returns:
-            A dict. Key is the skill name, value is the summary of skill.
-        ''' 
-        loaded_skills:Dict[str, SkillMetadata] = runtime.state["loaded_skills"]
-        return {key:loaded_skills[key]["summary"] for key in loaded_skills.keys()}
-
-
-    @tool 
-    def get_skill_content(skill_name:str, runtime:ToolRuntime) -> dict:
-        """
-        Get the detailed content of skill by `skill_name`.
-        Args:
-            skill_name(str): Name of skill.
-        Returns:
-            A dict containing the following keys:
-            - content: Full text content of the skill.
-            - references: Related reference files of the skill.
-            - scripts: Related scripts of the skill.
-        """
-        loaded_skills:Dict[str, SkillMetadata] = runtime.state["loaded_skills"]
-        if not skill_name in loaded_skills:
-            raise KeyError(f"Skill \"{skill_name}\" dose not exist.")
-
-        content = ""
-        with open(loaded_skills[skill_name]["path"], mode="r") as f:
-            lines = f.readlines()
-            content = "".join(lines)
-
-        if len(content) == 0:
-            raise RuntimeError("The content of skill.md is empty.")
-
-        if loaded_skills[skill_name]["references"]:
-            references = loaded_skills[skill_name]["references"]
-            # 在这里过滤掉跟作业提交相关的内容。
-            references = [item for item in references if not "job_submission" in item["path"] ]
-        else:
-            references = []
-
-
-        if loaded_skills[skill_name]["scripts"]:
-            scripts = loaded_skills[skill_name]["scripts"]
-        else:
-            scripts = []
-
-        return { "content": content, "references": references, "scripts": scripts }
-
+def init_load_skill_from_fs(model:BaseChatModel):
     @tool 
     def load_skill_from_filesystem(path:str, runtime:ToolRuntime) -> Command:   
         '''
@@ -153,7 +160,7 @@ def init_skill_tools(model:BaseChatModel):
             ]
         })
 
-    return [get_skill_summaries, get_skill_content, load_skill_from_filesystem]
+    return load_skill_from_filesystem
 
 
 

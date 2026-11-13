@@ -29,7 +29,7 @@ class RawPlan(BaseModel):
     '''
     steps: List[RawStep] = Field(description="List of plan steps.", default_factory=list)
 
-    topology: Optional[List[Tuple[int, int]]] = Field(description="Workflow execution topology, a directed acyclic graph. Step is represented by the index, each tuple represents an edge in the graph. For example, `[(0,1),(1,2)]` represents the sequential execution of '0→1→2'. `[(0,1),(0,2)]` represents parallel branches '0→1' and '0→2'. If the plan has only one step, this should be None.", default=None)
+    topology: List[Tuple[int, int]] = Field(description="Workflow execution topology, a directed acyclic graph. Step is represented by the index, each tuple represents an edge in the graph. For example, `[(0,1),(1,2)]` represents the sequential execution of '0→1→2'. `[(0,1),(0,2)]` represents parallel branches '0→1' and '0→2'. If a step idx does not connect to any other step, use (idx, idx) to represent an isolated node.", default_factory=list)
 
 class Step(BaseModel):
     step_id: str # 格式 plan-数字:step-数字:名字

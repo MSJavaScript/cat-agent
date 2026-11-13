@@ -12,7 +12,7 @@ from catagent.stepnode.models import InterruptState
 import httpx
 from typing import List, Annotated, Dict, Literal, Callable, Any 
 from catagent.tools.other.util_tools import execute_shell, edit_file, read_file
-from .skill_tool import init_skill_tools
+from .skill_tool import init_load_skill_from_fs, get_skill_content, get_skill_summaries
 from .planner_tool import init_planner_tool
 from .job_tool import init_job_manager_tools
 from .step_edit_tool import (get_steps_layout,
@@ -152,7 +152,9 @@ def create_orchestrator_agent(model:BaseChatModel,
              set_step_content, get_step_content, create_step] 
 
     tools.append(init_job_manager_tools(job_manager_url, http_client))
-    tools.extend(init_skill_tools(model=model))
+    tools.append(get_skill_summaries)
+    tools.append(get_skill_content)
+    tools.append(init_load_skill_from_fs(model=model))
     tools.extend(init_planner_tool(model=model))
 
     orchestrator_agent = create_agent(model=model,

@@ -5,20 +5,20 @@ from langchain.messages import ToolMessage
 from langgraph.prebuilt import ToolNode
 from langchain_core.tools.base import BaseTool
 from langchain.agents.middleware import ToolCallRequest
-
-from catagent.tools.other.incar_tool import (create_get_incar_draft_tool,
-                                    create_extract_user_defined_parameters_tool)
+from langgraph.errors import GraphBubbleUp
 
 from catagent.tools.neb.neb_tool import (sampling_ini_fin_states_on_surface,
                                 build_initial_nebpath_on_surface, 
                                 sampling_single_ads_configs_on_surface)
-from .skill_tool import get_skill_summaries, get_skill_content
+from catagent.workflow.skill_tool import get_skill_content, get_skill_summaries
 
 from catagent.tools.neb.reaction_system import ReactionSystemToolSets
 from catagent.tools.other.util_tools import execute_shell, edit_file, read_file
 from .models import ToolNamespace, AgentInterrupt, JobSubmission, AskForArgs
 from typing import List,  Dict,  Any, Literal, Optional
-import httpx, uuid 
+import httpx, logging, uuid 
+
+logger = logging.getLogger(__name__)
 
 TOOL_COLLECTIONS: Dict[str, ToolNamespace] = dict()
 TOOLS_BY_NAME: Dict[str, BaseTool] = dict()
@@ -104,7 +104,7 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
             return submission_failed(f"Unexpected error while submitting the job: {e}")
 
         try:
-            data = response.json()
+            data = response.json() 
         except ValueError as e:
             return submission_failed(
                 "The job manager returned an invalid JSON response. "
@@ -145,23 +145,26 @@ def init_common_tools(model:BaseChatModel):
             raise RuntimeError(f"Tool {item.name} is already exist.")
         TOOLS_BY_NAME[item.name] = item 
         name_list.append(item.name)
-    
+
+    details = '''Tools:
+- `create_reaction_system`: Call this tool firstly, you should create a reaction system before generating and editing reaction network.
+- `generate_elementary_steps`(HITL): Generate reactions by consider all kinds of combinations, constraints should be set to limit the number of reactions.
+- `render`: Render the reactions and intermediates into png pictures. The user should inspect these pictures to determine which reactions and intermediates will be deleted.
+- `delete_species`(HITL): Delete intermediates from the system.
+- `delete_reactions`(HITL): Delete reactions from the system.
+- `merge_reactions`(HITL): Merge some reactions. 
+- `dump`: Dump the reaction system object to a pkl file.
+- `load_from_file`: Load a reaction system object from pkl file.
+- `has_reaction_system`: Check if a reaction sytem exists.
+- `delete_reaction_system`: To save memory, we should delete the object when edit task is done.
+- `bind_to_surface`: Given a surface structure, bind all the initial and final states to the surface.
+'''
+
     TOOL_COLLECTIONS["reaction_system_tools"] = ToolNamespace(
-        description="Nebkit wrapper tools. Generate elementary reactions, edit reaction network. Given the surface structures, create initial and final states of all the generated reactions in batch.",
+        description=f"Generate elementary reactions, edit reaction network. Given the surface structures, create initial and final states of all the generated reactions in batch.\n{details}",
         tool_names=name_list
     )
 
-    collection = [create_extract_user_defined_parameters_tool(model), 
-                  create_get_incar_draft_tool(model)]
-    name_list = []
-    for item in collection:
-        if item.name in TOOLS_BY_NAME:
-            raise RuntimeError(f"Tool {item.name} is already exist.")
-        TOOLS_BY_NAME[item.name] = item 
-        name_list.append(item.name)
-    TOOL_COLLECTIONS["vasp_incar_tools"] = ToolNamespace(
-        description="Tools for generating vasp INCAR draft.",
-        tool_names=name_list)
 
     collection = [sampling_ini_fin_states_on_surface,
                   build_initial_nebpath_on_surface,
@@ -172,8 +175,14 @@ def init_common_tools(model:BaseChatModel):
             raise RuntimeError(f"Tool {item.name} is already exist.")
         TOOLS_BY_NAME[item.name] = item 
         name_list.append(item.name)
+
+    details = '''Tools:
+- `sampling_ini_fin_states_on_surface`: Given IS and FS molecules, attach them on a surface, all surface sites are considered.
+- `build_initial_nebpath_on_surface`: Given IS and FS, build neb path. This tool will handle some special cases, for example, it will adjust the structure if molecule dissociates in vacuum. 
+- `sampling_single_ads_configs_on_surface`: Attach an adsorbate on the surface, all surface sites are considered.
+'''
     TOOL_COLLECTIONS["structure_building_tools"] = ToolNamespace(
-        description="Nebkit wrapper tools. Build initial and final states on a surface. Bind an adsorbate to a surface. Build the initial NEB paths. Use these tools for small-scale structure building tasks.",
+        description=f"Build initial and final states on a surface. Bind an adsorbate to a surface. Build the initial NEB paths. Use these tools for small-scale structure building tasks.\n{details}",
         tool_names = name_list)
 
     
@@ -187,9 +196,9 @@ def init_common_tools(model:BaseChatModel):
         return {key:TOOL_COLLECTIONS[key].description for key in TOOL_COLLECTIONS.keys()}
 
     @tool
-    def update_accessible_tool_names(tool_collection_name:str,  runtime:ToolRuntime) -> Command:
+    def load_tool_collection(tool_collection_name:str,  runtime:ToolRuntime) -> Command:
         '''
-        Given a tool collection name, update the tool names which are accessible to the agent.
+        Given a tool collection name, update the tool names which are accessible to the agent, so that they can be used by agent.
         Args:
             name: Tool collection name.
         '''
@@ -223,7 +232,7 @@ def init_common_tools(model:BaseChatModel):
     def pause_to_ask(runtime:ToolRuntime, 
                      message:str, 
                      type: Literal["any", "confirmation", "choice-single", "choice-multiple"] = "any",
-                     meta_data:Dict[str, Any] = None ):
+                     meta_data:Dict[str, Any] = dict() ):
         '''
         Emit an interrupt to pause the agent for obtaining authorization, confirmation, or supplementary information from the user. For example, pause to ask user for a python environment path or let them manually install a package, ask the user to set key calculation parameters, such as DFT functional, MD temperature, linear solver type, etc., if they didn't provide.
         Args:
@@ -237,7 +246,7 @@ def init_common_tools(model:BaseChatModel):
         '''
         return {} 
 
-    return [get_tool_collection_infos, update_accessible_tool_names, pause_to_ask]
+    return [get_tool_collection_infos, load_tool_collection, pause_to_ask]
 
 
 
@@ -268,7 +277,10 @@ async def tool_call_wrapper(request:ToolCallRequest, handler):
                         tool_call_id = req.tool_call["id"],
                         tool_name = tool_name,
                         current_args = req.tool_call["args"],
-                        args_schema = req.tool.args_schema.model_json_schema() if req.tool.args_schema else {},
+                        # `args_schema` includes injected args such as `runtime: ToolRuntime`
+                        # and cannot be converted to JSON schema. `tool_call_schema`
+                        # is the model-facing schema without those injected args.
+                        args_schema = req.tool.tool_call_schema.model_json_schema() if req.tool and req.tool.tool_call_schema else {},
                         missing=[k for k, v in req.tool_call["args"].items() if v is None])
         
         return Command(update={"interrupts": {req.tool_call["id"]: ask.model_dump(mode='python')} })
@@ -284,8 +296,14 @@ async def tool_call_wrapper(request:ToolCallRequest, handler):
     #return await handler(req)
     try:
         return await handler(req)
+    except GraphBubbleUp:
+        raise
     except Exception as e:
-        error_msg = f"Tool error: ({e})"
+        # Keep the model-facing message concise, but log the full traceback so
+        # the line number is available in the server log.
+        logger.exception("Tool %s failed (tool_call_id=%s)",
+                         tool_name, req.tool_call.get("id"))
+        error_msg = f"Tool error ({type(e).__name__}): {e}"
         return Command(
             update={
                 "messages": [
@@ -293,8 +311,7 @@ async def tool_call_wrapper(request:ToolCallRequest, handler):
                                 name=req.tool_call.get("name"),
                                 content=error_msg, 
                                 tool_call_id=req.tool_call["id"])
-                ],
-                "tool_errors": [error_msg]
+                ]
             }
         )     
 

@@ -1,36 +1,45 @@
 ---
-name: nebkit
-description: Usage of tools in nebkit toolset. Generating reaction network, building initial and final states, and building neb path in batch.
+name: stepnode-tools
+description: Usage of tools in StepNode tool collections. Including structure-building and reaction network generation.
 metadata:
   tags:
+    - structure-building
     - neb
     - transition state search 
     - reaction network
 ---
 
-# Nebkit
+# StepNode tools
 
-This skill explains the usage of nebkit toolset, a series of wrapper tools of nebkit package, which provides functions of reaction network generation, building initial and final states in batch, and so on.
+This skill explains the usage of tools in StepNode subagent. These tools are organized in different collections. You can call `get_tool_collection_infos` to get all the available tool collections and call `load_tool_collection` to load a specific collection.
 
-## Tool of editing reaction network 
+## "structure_building_tools" collection.
+This collection contains tools which can build IS and FS, adsorption structure, and initial NEB path. 
 
-Tools below can generate, edit and visualize the reaction network. For a total reaction, such as CH4 + CO2 <-> 2* CO + 2* H2, there are infinite elementary reactions in theory, because we can generate infinite intermediates by combing atoms and atomic groups. Considering the computation cost, we need to set constraints when generate a reaction network. There are also multiple isomers for a chemical formula, for example, CHOH have the same formula as CH2 O, you cannot distinguish reactions "HCO + H <-> HCOH" and "HCO + H <-> H2CO" from the chemical formulas. To distinguish them, we provide visualization tool to render the reaction into `.png`, let the user to select the reactions and intermediates they need. There are some tools need Human In The Loop (HITL) to provide args, when the tool is called, it automatically pause the agent to ask the user for args.
+- `sampling_ini_fin_states_on_surface`: Given IS and FS molecules, automatically match their atomic indices, then attach them on a surface, all surface sites are considered.
+- `build_initial_nebpath_on_surface`: Given IS and FS, build neb path. This tool will handle some special cases, for example, it will adjust the structure if molecule dissociates in vacuum. 
+- `sampling_single_ads_configs_on_surface`: Attach an adsorbate on the surface, all surface sites are considered.
 
-The tools below marked by HITL will automatically pause the agent to ask the user to modify the tool args.
+
+## "reaction_system_tools" collection 
+
+This collection have tools which can generate, edit and visualize the reaction network. For a total reaction, such as CH4 + CO2 <-> 2* CO + 2* H2, there are infinite elementary reactions in theory, because we can generate infinite intermediates by combing atoms and atomic groups. Considering the computation cost, we need to set constraints when generate a reaction network. There are also multiple isomers for a chemical formula, for example, CHOH have the same formula as CH2 O, you cannot distinguish reactions "HCO + H <-> HCOH" and "HCO + H <-> H2CO" from the chemical formulas. To distinguish them, we provide visualization tool to render the reaction into `.png`, let the user to select the reactions and intermediates they need. There are some tools need Human In The Loop (HITL) to provide args, when the tool is called, it automatically pause the agent to ask the user for args.
+
+The tools below marked by HITL will automatically pause the agent to ask the user to modify the tool args. The details of network generation, e.g, constraints, will be asked by StepNode, Orchestrator should leave these details to StepNode.
 
 - `create_reaction_system`: Call this tool firstly, you should create a reaction system before generating and editing reaction network.
-- `generate_elementary_steps`(HITL): Generate reactions by consider all kinds of combinations, constraints should be set to limit the number of reactions.
+- `generate_elementary_steps`(HITL): Generate reactions by consider all kinds of combinations, constraints should be set to limit the number of reactions. **No intermediate fragments are needed, they will be generated automatically**.
 - `render`: Render the reactions and intermediates into png pictures. The user should inspect these pictures to determine which reactions and intermediates will be deleted.
 - `delete_species`(HITL): Delete intermediates from the system.
 - `delete_reactions`(HITL): Delete reactions from the system.
 - `merge_reactions`(HITL): Merge some reactions. `generate_elementary_steps` only consider single-bond forming or breaking, reactions such as "NHOH + H <-> NH + H2O" will be split into two or three reactions, for example, "NHOH <-> NH + OH", "OH+H<->H2O". We need call `merge_reactions` to let the user determine which reactions should be merged.
-- `dump`: Dump the reaction system object to a pkl file.
+- `dump`: Dump the reaction system object to a pkl file, so that it can be used in another run.
 - `load_from_file`: Load a reaction system object from pkl file.
 - `has_reaction_system`: Check if a reaction sytem exists.
 - `delete_reaction_system`: To save memory, we should delete the object when edit task is done.
 - `bind_to_surface`: Given a surface structure, bind all the initial and final states to the surface. For complex surface, such as Fe(110), there will be many configurations, user should select which will be kept to limit the computation cost.
 
-### General workflow to generate a reaction network
+#### General workflow to generate a reaction network
 Take reaction CH4 + CO2 <-> 2* CO + 2* H2 as an example.
 1. Generate all the reactants and products structures, using `*.xyz` format.
     ```bash
@@ -76,9 +85,3 @@ Take reaction CH4 + CO2 <-> 2* CO + 2* H2 as an example.
     ```
 5. When reaction network edit complete, you can call `dump` to dump the reaction system object into a pkl file. Then call `bind_to_surface` to attach IS and FS of each elementary step to surface. At last, you should call `delete_reaction_system` to delete the object from memory.
 
-## Neb and adsorption tools
-
-If you only need to build IS, FS or neb path of a few reactions, and you have the structures of IS and FS molecules, you can use these three tools to complete simple structure building tasks.
-- `sampling_ini_fin_states_on_surface`: Given IS and FS molecules, attach them on a surface, all surface sites are considered.
-- `build_initial_nebpath_on_surface`: Given IS and FS, build neb path. This tool will handle some special cases, for example, it will adjust the structure if molecule dissociates in vacuum. 
-- `sampling_single_ads_configs_on_surface`: Attach an adsorbate on the surface, all surface sites are considered.

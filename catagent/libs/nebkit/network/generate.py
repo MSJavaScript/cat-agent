@@ -102,7 +102,7 @@ def form_bond_in_mol(mol:Chem.Mol, index1:int, index2:int) -> Chem.Mol:
     new_mol = new_mol.GetMol()
     return new_mol
 
-def break_bond_in_mol(mol:Chem.Mol, index1:int, index2:int)->Tuple[Chem.Mol]:
+def break_bond_in_mol(mol:Chem.Mol, index1:int, index2:int)->Tuple[Chem.Mol, ...]:
     bond = mol.GetBondBetweenAtoms(index1, index2)
     if bond is None:
         raise ValueError(f"There is no bond between {index1} and {index2}")    
@@ -110,7 +110,10 @@ def break_bond_in_mol(mol:Chem.Mol, index1:int, index2:int)->Tuple[Chem.Mol]:
     rw_mol.RemoveBond(index1, index2)
     temp_mol = rw_mol.GetMol()
     frags = Chem.GetMolFrags(temp_mol, asMols=True)
-    return (make_pure_graph(frags[0]), make_pure_graph(frags[1]))
+    # Removing a bond that belongs to a ring does not disconnect the molecule,
+    # so `frags` may contain a single fragment (ring opening). Return however
+    # many fragments result instead of assuming exactly two.
+    return tuple(make_pure_graph(frag) for frag in frags)
 
 
 def get_mol_info(mol:Chem.Mol):
@@ -175,7 +178,7 @@ class ExploreReactionNetwork:
         self.prod_smiles = {Chem.MolToSmiles(mol, canonical=True) for mol in self.prod_mols}
 
         self.forbidden_patterns = []
-        if not forbidden_pattern is None:
+        if forbidden_pattern:
             for symbols, adjacent_strs in forbidden_pattern:
                 self.forbidden_patterns.append(pattern_to_mol(symbols, adjacent_strs))
 

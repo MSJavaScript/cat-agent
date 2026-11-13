@@ -106,7 +106,7 @@ def create_providers(setting:Dict[str, Any]) -> Dict[str, BaseProvider]:
     return providers
 
 
-def build_app(setting_json_path:str) -> FastAPI:
+def build_app(setting_json_path:str, dotenv_path:str) -> FastAPI:
     if not os.path.isfile(setting_json_path):
         raise FileNotFoundError(f"{setting_json_path} is not a file.")
     with open(setting_json_path, mode="r") as f:
@@ -119,7 +119,7 @@ def build_app(setting_json_path:str) -> FastAPI:
     db = JobDB(db_path)
     providers = create_providers(setting["providers"])
 
-    dotenv.load_dotenv()
+    dotenv.load_dotenv(dotenv_path)
 
     model_name = os.getenv("MODEL_NAME").lower()
     if "qwen" in model_name:
@@ -198,7 +198,7 @@ def build_app(setting_json_path:str) -> FastAPI:
 
     return app
 
-def run(*, setting: str, host: str, port: int, log: str, level: str = "info") -> None:
+def run(*, setting: str, host: str, port: int, log: str, dotenv_path:str, level: str = "info") -> None:
     """Run the jobmanager HTTP service.
 
     Shared by ``python -m catagent.jobmanager.server`` and the
@@ -206,7 +206,7 @@ def run(*, setting: str, host: str, port: int, log: str, level: str = "info") ->
     """
     listener = setup_logging(log, level)
     try:
-        app = build_app(setting)
+        app = build_app(setting, dotenv_path)
         uvicorn.run(app, host=host, port=port, log_level=level)
     finally:
         listener.stop()
@@ -219,10 +219,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True, help="Port of app.")
     parser.add_argument("--log", type=str, required=True, help="Path to log file.")
     parser.add_argument("--level", type=str, default="info", choices=["info", "debug"], help="Log level.")
+    parser.add_argument("--dotenv", type=str, required=True, help="Path to the .env file containing LLM api-key.")
     args = parser.parse_args()
 
     run(setting=args.setting, host=args.host, port=args.port,
-        log=args.log, level=args.level)
+        log=args.log, level=args.level, dotenv_path=args.dotenv)
 
 if __name__ == "__main__":
     main()
