@@ -86,7 +86,7 @@ class ReactionSystemToolSets:
             json_log_path: str,
             visualization_dir: str):
             '''
-            Create a `ReactionSystem` object.
+            Create a `ReactionSystem` object. A molecule should only appear one time. For example, for reaction "N2 + 3*H2 <-> 2*NH3", just call this tool by `reactants_mol_pathes=['/path/to/N2.xyz', '/path/to/H2']` and `products_mol_pathes = ['/path/to/NH3']`. 
             Args:
                 system_name: A short name of the reaction system, e.g. 'CO2,CH4->CO,H2,H2O'.
                 reactants_mol_pathes: Path to reactant molecules files (usually in `.xyz` format).

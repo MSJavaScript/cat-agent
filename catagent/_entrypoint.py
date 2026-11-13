@@ -24,6 +24,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             host=args.host,
             port=args.port,
             log=args.log,
+            dotenv_path=args.dotenv,
             level=args.level,
         )
         return

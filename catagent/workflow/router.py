@@ -5,6 +5,8 @@ from langgraph.types import Command, Send
 from langgraph.graph import END 
 from typing import Dict
 import asyncio, os 
+import logging
+logger = logging.getLogger("catagent")
 
 # 这里变成串行请求是因为任务步骤之间都是相互关联的。Orchestrator需要知道全局的状态
 # NOTE: this node is wrapped by `orchestrator_request_queue_node` in agent.py,
@@ -72,6 +74,8 @@ def _dependency_done(depend_on_id:str, steps:Dict[str, Step]) -> bool:
 
 
 def router(state:WorkflowState):
+    logger.info("Enter router node.")
+
     req_list = []
     stepnode_task_list = []
     step_running_update = dict()
@@ -94,7 +98,8 @@ def router(state:WorkflowState):
     # 1.2 如果步骤正常完成，则仅仅记录状态
     update_success_steps = dict()
     message_for_success_steps = "Status logging request from Router:\n The following steps complete successfully. Please just log them in `state.md`.\n\n"
-    
+
+    logger.info("Router node, processing the results of steps.")
     for key in step_results.keys():
         result = step_results[key]
         if result.processed:
@@ -157,6 +162,7 @@ def router(state:WorkflowState):
     message_for_status_correction = ""
     message_for_dependence_correction = ""
 
+    logger.info("Router node, checking the dependence of steps.")
     for key in steps_view.keys():
         step = steps_view[key]
         go_to_replanning = False 
@@ -246,7 +252,7 @@ def router(state:WorkflowState):
 
             # 写入readme.md 
             write_readme(step.workdir, step)
-            message_for_stepnode = f"Complete this step. Read `readme.md` in workdir to get the task content.\nWorkdir: {step.workdir}\nWhen task completes, write a summary section in `report.md` to summarize this run and error messages (if any)."
+            message_for_stepnode = f"Complete this step. Read `readme.md` in workdir to get the task content.\nWorkdir: {step.workdir}\nCall `get_tool_collection_infos` to get the descriptions of all the tool collections. Call `update_accessible_tool_names` to add a set of tools.\nPrefer to use the scripts provided by skill.\nWhen task completes, write a summary section in `report.md` to summarize this run and error messages (if any)."
             stepnode_task_list.append(Send(node="step_node", 
                                     arg= {
                                         "workdir": step.workdir,
@@ -257,6 +263,7 @@ def router(state:WorkflowState):
                                     }))
 
 
+    logger.info("Router node, all the task done.")
     if len(message_for_workdir_correction) > 0:
         header = "Correction requests from Router:\nThe workdirs of following steps are not set or does not exist\n"
         message_for_workdir_correction = header + message_for_workdir_correction
@@ -310,6 +317,7 @@ def router(state:WorkflowState):
                     step_running_update):
         step_state_updates.update(changes)
 
+    logger.info("Router node, exit.")
     return Command(goto=goto_list, update={
         "step_results": update_step_results,
         "steps": step_state_updates,

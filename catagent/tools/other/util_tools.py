@@ -1,11 +1,13 @@
 from langchain.tools import tool
 import asyncio, aiofiles, os
-from typing import List, Optional, Literal, Dict, Any
-from langgraph.types import interrupt
+from typing import List, Optional, Literal
 from datetime import datetime
+from langchain.messages import ToolMessage
+from langgraph.types import Command
+from langchain.tools import  ToolRuntime
 
 @tool
-async def execute_shell(command: str, cwd: str = None, timeout: int = 60) -> dict:
+async def execute_shell(runtime:ToolRuntime, command: str, cwd: str = None, timeout: int = 60) -> dict:
     """
     Execute a shell command. Tips: Use `cat`, `head`, `grep`, `sed`, `awk` or `echo` etc. to quickly read or edit files. 
     Args:
@@ -26,15 +28,44 @@ async def execute_shell(command: str, cwd: str = None, timeout: int = 60) -> dic
         except asyncio.TimeoutError as e:
             proc.kill()
             await proc.wait()
-            raise e
+            return Command(update={
+                "messages": [ToolMessage(
+                    status="error",
+                    content=f"Error, timeout: {e}",
+                    tool_call_id=runtime.tool_call_id,
+                    name="execute_shell"
+                )]
+            })
+
         content = {
             "return_code": proc.returncode,
             "stdout": stdout.decode() if stdout else "",
             "stderr": stderr.decode() if stderr else "",
         }
-        return content
+
+        inject_message = ""
+        if "ImportError" in content["stderr"] or "ModuleNotFoundError" in content["stderr"]:
+            inject_message = "You may call `pause_to_ask` to ask user for help." 
+
+        return Command(update={
+            "messages":[
+                ToolMessage(
+                    content=f"{content}\n{inject_message}",
+                    tool_call_id=runtime.tool_call_id,
+                    name="execute_shell"
+                )
+            ]
+        })
+        
     except Exception as e:
-        raise e
+        return Command(update={
+            "messages": [ToolMessage(
+                status="error",
+                content=f"Error: {e}",
+                tool_call_id=runtime.tool_call_id,
+                name="execute_shell"
+            )]
+        })
 
 
 def _with_timestamp(lines: List[str], add_timestamp: bool) -> List[str]:
@@ -71,7 +102,11 @@ async def edit_file(
         add_timestamp: Add timestamp at the start of first line.
     '''
     if not os.path.isfile(file_path):
-        await execute_shell.ainvoke(dict(command=f"echo > {file_path}"))
+        dirname = os.path.dirname(file_path)
+        if not os.path.isdir(dirname):
+            raise NotADirectoryError(f"{dirname} is not a directory.")
+        async with aiofiles.open(file_path, mode="w") as f:
+            pass
 
     lines = _with_timestamp(lines, add_timestamp)
 

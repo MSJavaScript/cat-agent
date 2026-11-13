@@ -15,16 +15,30 @@ This document explains some basic knowledge of vasp usage.
 Basic input files of VASP are `INCAR`, `POSCAR`, `KPOINTS` and `POTCAR`. Specific calculations, e.g. dimer and constrained molecular dynamics, need extra inputs. See the corresponding skill docs for more details.
 
 ### INCAR
-Agent tool `generate_incar_draft` can produce a draft INCAR from the user's prompt. For example, pass the following prompt to the tool:
-```
-User: "I want to optimize the CO2 adsorption configuration on Ni(111) surface. With energy cutoff 420, RPBE functional."
-```
-`generate_incar_draft` will return a draft containing tags which **maybe** applied to this calculation. Be cautious that, this draft is only a reference. We should look at the skill doc corresponding the calculation and refine it. Also, it never set actual values of `MAGMOM`, `LDAUU`, `LDAUJ`, the tags which depend on the POSCAR.
+Here are some basic INCAR parameter setting knowledge. For the parameter settings of a specific function, please refer to the corresponding skill. After you determine the INCAR tags, you should call `pause_to_ask` to confirm with the user. This also applies to any other computation softwares.
 
-NOTE: For tags that significantly affect the calculation results, such as `LDAUU`, request the user to provide their values if they haven't provide them. 
+#### Calculation precision
+For most calculations, `PREC=Normal` and `EDIFF = 1.0e-5` are fine. `PREC=Accurate` is only required when we need very accurate force, it increase 30% computation cost. For `ENCUT`, `ENCUT = 400` is good for most cases, especially for catalytic computation, in which we only need relative energies and error cancellation can guarantee a good precision.
+
+#### Electronic step algorithm
+For catalytic computation, we usually use `ALGO = Fast`. For other cases we can use `ALGO = Normal` (default setting). If electronic step fails to converge, switch to `ALGO = Conjugate`, a more robust algorithm.
+
+#### Geometry optimization
+`IBRION` controls how ions move duration calculation. `IBRION = 2` is good for most cases. For small molecules, such as CH4, CO2 etc, we need very accurate geometry to eliminate imaginary frequency. In this case use `IBRION = 1` and a very small `POTIM`, e.g. `POTIM = 0.08`. Becuase the initial geometry of molecule is usually close to energy minimum, use large step will cause trajectory oscillation, make it hard to converge.
+
+Use `ISIF = 2` for molecule and slabs, `ISIF = 3` for bulk to simultaneously relax the lattice constants. 
+
+#### Smearing
+
+Use `ISMEAR = 1` or `2` for metallic system, `SIGMA = 0.2` is a reasonable choice for metals. Avoid using `ISMEAR > 0` for semiconductors and insulators since it might cause severe problems. For semiconductors or insulators, you can use the tetrahedron method (`ISMEAR = -5`) if you have at least 4 k points to form a tetrahedron. If you have no prior knowledge of your system always use Gaussian smearing ISMEAR = 0 in combination with a small `SIGMA = 0.03` to 0.1.
+
+#### Spin polarization, DFT+U and vdW correction
+More setting does not mean more accurate, because all the methods are approximation. `ISPIN = 2`, `LDAU = .TRUE.` or `IVDW` increase the computation cost a lot, you should pause to ask the user if they want to use these settings. Also, you should ask them for `MAGMOM` if `ISPIN = 2` is used, and ask them for the settings of other DFT+U tags if `LDAU = .TRUE.`, e.g. `LDAUU`, `LDAUL`, `LDAUJ`, `LMAXMIX`, and `LDAUTYPE`.
+
+
 
 ### POSCAR
-See the "structure building" skill to see how to build a structure.
+See the "structure-building" skill to see how to build a structure.
 
 ### KPOINTS
 The number of k-points in a direction is inversely proportional to the lattice length. For a slab, the number of kpoints is usually 1 in the direction of vacuum region. For the calculation of molecule, we usually build a large cell to avoid periodic interaction, the kpoints are usually (1,1,1) (gamma only). 

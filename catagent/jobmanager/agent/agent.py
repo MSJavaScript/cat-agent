@@ -158,9 +158,9 @@ async def run_job_agent(
     最后返回一个结果
     '''
     if phase == "checking":
-        message = HumanMessage(f"Check the job results download in local dir {local_dir}. For the final output, make sure to generate a structured `CheckingOutput` object for the `checking_output` field.")
+        message = HumanMessage(f"Check the job results download in local dir {local_dir}. For the final output, make sure to generate a structured `CheckingOutput` object for the `checking_output` field. NOTE:\n1. You are only allowed to work in {local_dir}, NEVER read or edit files outside this dir.\n2. Do not read any markdown files, they are irrelevant.")
     else:
-        message = HumanMessage(f"Preprocess the job inputs in local dir {local_dir}. For the final output, make sure to generate a structured `PreprocessingOutput` object for the `preprocessing_output` field.")
+        message = HumanMessage(f"Preprocess the job inputs in local dir {local_dir}. For the final output, make sure to generate a structured `PreprocessingOutput` object for the `preprocessing_output` field. NOTE:\n1. You are only allowed to work in {local_dir}, NEVER read or edit files outside this dir.\n2. Do not read any markdown files, they are irrelevant.")
 
     context = JobManagerAgentContext(provider_id=provider_id, 
                                      job_env_name=job_env_name,

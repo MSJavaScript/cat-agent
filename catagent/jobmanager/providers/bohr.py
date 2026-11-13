@@ -210,6 +210,7 @@ class BohrProvider(BaseProvider):
                 logger.error(f"Fail to unzip out.zip in {zipdir}. {output['stderr'].strip()}")
                 return False 
 
+            await run_shell_command("rm -f out.zip", zipdir, 120)
             # Merge the downloaded files into local_dir.  `mv <dir>/* .` nests a
             # directory when local_dir already contains a non-empty directory
             # with the same name; rsync merges recursively instead.  Result
@@ -220,7 +221,6 @@ class BohrProvider(BaseProvider):
                 f"--exclude=run.sh --exclude=job.json --exclude=job_description.json "
                 f"--exclude='*.md' --exclude='*.sh' --exclude='*.py' "
                 f"{shlex.quote(bohr_job_id)}/ . "
-                f"&& rm -f {shlex.quote(bohr_job_id)}/out.zip "
                 f"&& rm -rf {shlex.quote(bohr_job_id)}",
                 local_dir, 120)
             if output["return_code"] != 0:

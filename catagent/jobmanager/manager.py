@@ -59,6 +59,7 @@ class JobManager:
         self.client = httpx.AsyncClient(timeout=30)
         self.stopping = False 
         # 后台任务（finalize、预处理的提交）统一登记，便于在关闭时回收并记录异常。
+        # 一个对象可以放在set中必须是可哈希的，需要重载__hash__和__eq__
         self._tasks: set[asyncio.Task] = set()
         # 正在预处理/提交中的job_uuid，防止并发的重复提交请求。
         self._inflight: set[str] = set()
@@ -69,6 +70,7 @@ class JobManager:
 
     def _spawn(self, coro: Awaitable[Any]) -> asyncio.Task:
         """把协程注册为后台任务，异常不会被静默丢弃。"""
+        # 当使用create_task 之后，coro （一个async函数的调用）就会开始执行
         task = asyncio.create_task(coro)
         self._tasks.add(task)
 
@@ -79,7 +81,8 @@ class JobManager:
             exc = t.exception()
             if exc is not None:
                 logger.error(f"Background task failed: {exc}", exc_info=exc)
-
+        
+        # 执行结束后调用回调函数
         task.add_done_callback(_on_done)
         return task
 
@@ -636,6 +639,7 @@ class JobManager:
         means "download everything"; without a declaration there is nothing
         deterministic to check.
         """
+        return []
         patterns = [p for p in (record.result_patterns or []) if p]
         if not patterns:
             return []

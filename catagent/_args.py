@@ -117,6 +117,12 @@ def _add_jobmanager_args(parser: argparse.ArgumentParser) -> None:
         help="Path to the jobmanager log file (default: jobmanager.log).",
     )
     parser.add_argument(
+            "--dotenv",
+            type=str, 
+            required=True, 
+            help="Path to the .env file containing LLM api-key."
+    )
+    parser.add_argument(
         "--level",
         default="info",
         choices=["info", "debug"],

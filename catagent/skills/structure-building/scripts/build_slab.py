@@ -247,7 +247,7 @@ ase_parser = subparsers.add_parser("ase", help="Use ase to build simple slabs, s
 ase_parser.add_argument("-e", "--element", type=str, required=True, help="A single chemical element.")
 ase_parser.add_argument("-f", "--facet", type=str, required=True, help="The facet. Support fcc100, fcc110, fcc111, fcc211, bcc100, bcc110, bcc111, hcp0001 and hcp10m10.")
 ase_parser.add_argument("-s", "--size", type=str, required=True, help="The size of slab, three integers separated by comma, for example, '6,4,5' is a 6*4, 5 layers slab.")
-ase_parser.add_argument("-v", "--vacuum", type=float, default=8.0, help="The vacuum size. Vacuum region is along c-direction and slab is centered. Default 8.0.")
+ase_parser.add_argument("-v", "--vacuum", type=float, default=8.0, help="The vacuum size on both side. Vacuum region is along c-direction and slab is centered. Default 8.0 (16.0 in total).")
 ase_parser.add_argument("--nfix", type=int, help="The number of layers you want to fix the positions.")
 ase_parser.add_argument("-a", "--a_length", type=float, help="Lattice constant in `a` direction.")
 ase_parser.add_argument("-c", "--c_length", type=float, help="Lattice constant in `c` direction.")

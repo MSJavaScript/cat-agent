@@ -17,11 +17,11 @@ def init_planner_tool(model:BaseChatModel):
         Args:
             related_skill_names: Names of skills related to this question.
             task_content: Question/job content.
-            plan_steps_guidance: Quidances for the plan, planner will generate the same number of steps. Add a prompt "the step need further planning" to set a RawStep `need_further_planning = True`. 
+            plan_steps_guidance: Quidances for the plan, planner should generate the same number of steps. Add a prompt "the step need further planning" to set a RawStep `need_further_planning = True`. 
             task_context: The context of the question. Such as the file path and calculation setting specified by the user, the error message and possible correction of a step.
         '''
 
-        system_prompt = "You are an agent responsible for planning the execution flow of scientific computing works. Please follow the guidance to make the plan. At last, make sure to generate a structued output `RawPlan` object, instead of plain text."
+        system_prompt = "You are an agent responsible for planning the execution flow of scientific computing works. Please follow the guidance to make the plan. At last, make sure to generate a structued output `RawPlan` object, instead of plain text. **NOTE: The number of steps you generated should be exactly equal to the guidance steps.**"
 
         loaded_skills:Dict[str, SkillMetadata] = runtime.state["loaded_skills"]
         skill_doc = ""
@@ -50,9 +50,9 @@ def init_planner_tool(model:BaseChatModel):
             skill_doc += script_content + reference_content
 
 
-        guidance = "**The plan step guidances you should follow**:\n"
+        guidance = f"**The plan step guidances you should follow (the number of plan steps your generated should be equal to {len(plan_steps_guidance)})**:\n"
         for i, item in enumerate(plan_steps_guidance):
-            guidance += f"{i}. {item}\n"
+            guidance += f"- Step{i}: {item}\n"
 
 
         prompt = f"Please make plan for the question/job below:\n {task_content}"
@@ -61,20 +61,27 @@ def init_planner_tool(model:BaseChatModel):
 
         prompt += f"{skill_doc}\n\n{guidance}"
 
-
-        try:
-            response = model.with_structured_output(RawPlan).invoke([
-                SystemMessage(content=system_prompt), 
-                HumanMessage(content=prompt)])
-            response = RawPlan.model_validate(response)
-        except Exception as e:
+        for _ in range(3):
+            try:
+                response = model.with_structured_output(RawPlan).invoke([
+                    SystemMessage(content=system_prompt), 
+                    HumanMessage(content=prompt)])
+                response = RawPlan.model_validate(response)
+                break
+            except Exception as e:
+                pass 
+        else:
             return Command(update={
-                "messages":[ ToolMessage(status="error",
-                                         content=f"Error:{e}", 
-                                         tool_call_id=runtime.tool_call_id,
-                                         name="planner")]
-            })
-    
+                            "messages":[ ToolMessage(status="error",
+                                                    content="Error: planner did not return a valid RawPlan object, please try again.", 
+                                                    tool_call_id=runtime.tool_call_id,
+                                                    name="planner")]
+                        })
+
+
+        warnning_message = ""
+        if len(plan_steps_guidance) != len(response.steps):
+            warnning_message = f"WARNNING: The number of guidance steps are {len(plan_steps_guidance)}, but {len(response.steps)} RawSteps are generated.\n"
         # Key 的格式为rawplan-id
         raw_plan_id_list = []
         for key in runtime.state["raw_plan_dict"].keys():
@@ -82,7 +89,7 @@ def init_planner_tool(model:BaseChatModel):
             raw_plan_id_list.append(int(b))
         rawplan_id = f"rawplan-{max(raw_plan_id_list)+1 if raw_plan_id_list else 0}"
 
-        returned_message = f"Raw plan abstract:\nExecution flow: {response.topology}\nSteps:\n"
+        returned_message = f"{warnning_message}Raw plan abstract:\nExecution flow (tuple with same elements, such as (idx, idx), represents an isolated node idx): {response.topology}\nSteps:\n"
         for i, raw_step in enumerate(response.steps):
             returned_message += f"Step {i}({raw_step.name}): {raw_step.content}\n"
         returned_message += (f"The raw plan has been written to the agent state under the id "
@@ -134,6 +141,30 @@ def init_planner_tool(model:BaseChatModel):
             result[key] = info 
         return result 
 
+    @tool 
+    def delete_raw_plan(runtime:ToolRuntime, raw_plan_id: str):
+        '''
+        Delete a raw plan.
+        Args:
+            raw_plan_id: Id of the raw plan you want to delete.
+        '''
+        raw_plan_dict:Dict[str, RawPlan] = runtime.state.get("raw_plan_dict", dict())
+        if raw_plan_id in raw_plan_dict:
+            return Command(update={
+                "messages": [ToolMessage(content=f"{raw_plan_id} is deleted.", 
+                                         tool_call_id=runtime.tool_call_id, 
+                                         name="delete_raw_plan")],
+                "raw_plan_dict": {raw_plan_id: None }
+            })
+        else:
+            return Command(update={
+                "messages": [ToolMessage(status="error",
+                                         content=f"Error: {raw_plan_id} does not exist.", 
+                                         tool_call_id=runtime.tool_call_id, 
+                                         name="delete_raw_plan")]
+            })
+
+
 
     @tool 
     def register_raw_plan(runtime:ToolRuntime,
@@ -143,7 +174,7 @@ def init_planner_tool(model:BaseChatModel):
                           raw_step_indices_group:List[List[int]|int] = None,
                           step_ids_group:List[List[str]|str] = None): 
         '''
-        Register a raw plan. 
+        Register a raw plan. After registration, this raw plan will be automatically deleted.
         
         For `"append"` mode, use `depend_on_external` to set the external dependence of each raw step. For example, if raw step 0 depends `"plan-1:step-1:xxx", "plan-2:step-2:yyy"`, then the first list of `depend_on_external` should be `["plan-1:step-1:xxx", "plan-2:step-2:yyy"]`. If a step depend the whole plan-x, just set `["plan-x"]`
          
@@ -180,7 +211,7 @@ def init_planner_tool(model:BaseChatModel):
                         required_by=required_by)
             return step 
          
-        raw_plan_dict:Dict[str, RawPlan] = runtime.state["raw_plan_dict"]
+        raw_plan_dict:Dict[str, RawPlan] = runtime.state.get("raw_plan_dict", dict())
         raw_plan_keys = list(raw_plan_dict.keys())
 
         if not raw_plan_id in raw_plan_dict:
@@ -214,8 +245,9 @@ def init_planner_tool(model:BaseChatModel):
         topology = raw_plan.topology
         if topology:
             for i,j in topology: # i → j
-                required_by[i].append(j)
-                depend_on[j].append(i)
+                if i != j:
+                    required_by[i].append(j)
+                    depend_on[j].append(i)
 
         if action == "append":
             update = dict()
