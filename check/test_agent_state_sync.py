@@ -21,6 +21,7 @@ from langgraph.types import Send
 from catagent.agent import _steps_delta
 from catagent.workflow.models import (
     Step,
+    StepResult,
     dict_reducer,
     orchestrator_request_reducer,
 )
@@ -108,6 +109,24 @@ def test_delta_keeps_new_steps_as_objects() -> None:
     merged = dict_reducer({}, delta)
     check(isinstance(merged[new.step_id], Step),
           "new step was stored as a plain dict")
+
+
+def test_delta_propagates_deleted_steps() -> None:
+    # register_raw_plan(replace) removes the step from the inner graph.  The
+    # deletion has to reach the outer workflow as a None patch.
+    kept = make_step("plan-0:step-0:a", status="running", workdir="/w")
+    removed = make_step("plan-0:step-1:b", status="pending", workdir="/old")
+    delta = _steps_delta(
+        {kept.step_id: kept, removed.step_id: removed},
+        {kept.step_id: kept.model_copy(deep=True)},
+    )
+    check(delta == {removed.step_id: None},
+          f"deleted step was not propagated: {delta}")
+
+    merged = dict_reducer({kept.step_id: kept, removed.step_id: removed}, delta)
+    check(removed.step_id not in merged,
+          "dict_reducer did not remove the deleted step")
+    check(kept.step_id in merged, "the surviving step was dropped")
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +267,32 @@ async def test_running_step_is_not_dispatched_again() -> None:
         check(sends == [], f"a running step was dispatched twice: {sends!r}")
 
 
+async def test_router_drops_result_for_deleted_step() -> None:
+    # register_raw_plan(replace) removed the step while its StepNode result was
+    # still queued.  There is no Step to correct anymore, so the router must
+    # mark the result processed and continue instead of raising AssertionError
+    # (or resurrecting the deleted step).
+    deleted_id = "plan-0:step-0:gone"
+    state = {
+        "finalization": False,
+        "steps": {},
+        "step_results": {
+            deleted_id: StepResult(
+                status="error", processed=False, step_id=deleted_id,
+                summary="boom", artifacts={}),
+        },
+        "orchestrator_requests": {},
+        "loaded_skills": {},
+        "project_workdir": "/tmp",
+    }
+    command = await router(state, config("t-deleted"))
+    results = command.update.get("step_results") or {}
+    check(results.get(deleted_id) == {"processed": True},
+          f"the deleted step result was not dropped: {results!r}")
+    check(deleted_id not in (command.update.get("steps") or {}),
+          "the router resurrected a deleted step")
+
+
 async def test_step_dispatch_carries_context_and_skill_artifacts() -> None:
     """A skill loaded in this turn must reach the StepNode it enables."""
     with tempfile.TemporaryDirectory() as workdir:
@@ -290,12 +335,14 @@ async def main() -> None:
         ("delta contains only changed fields", test_delta_contains_only_changed_fields),
         ("delta preserves concurrent outer changes", test_delta_does_not_clobber_concurrent_outer_changes),
         ("delta keeps new steps as objects", test_delta_keeps_new_steps_as_objects),
+        ("delta propagates deleted steps", test_delta_propagates_deleted_steps),
         ("fingerprint ignores message ids", test_fingerprint_ignores_message_ids),
         ("identical request keeps one entry", test_identical_request_keeps_one_entry_and_stays_sent),
         ("queue does not redispatch sent request", test_queue_does_not_redispatch_a_sent_request),
         ("queue dispatch uses current snapshot", test_queue_dispatch_uses_current_step_snapshot),
         ("queue keeps payload when marking sent", test_queue_marks_sent_without_losing_payload),
         ("running step is not dispatched twice", test_running_step_is_not_dispatched_again),
+        ("router drops result for deleted step", test_router_drops_result_for_deleted_step),
         ("step dispatch carries context", test_step_dispatch_carries_context_and_skill_artifacts),
     ]
     for name, function in tests:

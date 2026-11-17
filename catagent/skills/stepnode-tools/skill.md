@@ -11,7 +11,7 @@ metadata:
 
 # StepNode tools
 
-This skill explains the usage of tools in StepNode subagent. These tools are organized in different collections. You can call `get_tool_collection_infos` to get all the available tool collections and call `load_tool_collection` to load a specific collection.
+This skill explains the usage of tools in StepNode subagent. These tools are organized in different collections. Call `get_tool_collection_infos` to get all the available tool collections and call `load_tool_collection` to load a specific collection.
 
 ## "structure_building_tools" collection.
 This collection contains tools which can build IS and FS, adsorption structure, and initial NEB path. 

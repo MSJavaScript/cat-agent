@@ -366,12 +366,46 @@ def init_planner_tool(model:BaseChatModel):
                     step_ids_will_be_deleted.update(item)
                 else:
                     step_ids_will_be_deleted.add(item)
-            
+
+            # Surviving steps that are not part of `update` can still point at
+            # a deleted step, most commonly a predecessor's `required_by`
+            # (e.g. `prepare` used to be required by the replaced steps).
+            # Patch them too so no state keeps referencing a deleted step id.
+            for key, step in step_dict.items():
+                if key in step_ids_will_be_deleted or key in update:
+                    continue
+                if (step.depend_on & step_ids_will_be_deleted
+                        or step.required_by & step_ids_will_be_deleted):
+                    update[key] = step.model_copy(deep=True)
+
+            for key in update.keys():
+                update[key].depend_on.difference_update(step_ids_will_be_deleted)
+                update[key].required_by.difference_update(step_ids_will_be_deleted)
+
+            # Keep `required_by` as the inverse of `depend_on`: when a new step
+            # depends on a surviving step (a predecessor from an older plan),
+            # update that predecessor's `required_by` as well.  Without this,
+            # `prepare.required_by` still advertised the replaced steps (or
+            # became empty) instead of pointing at the new ones.
+            for key in list(update.keys()):
+                if key in step_ids_will_be_deleted:
+                    # This entry is only kept so the final loop can set it to
+                    # None; it must not register itself as a dependent.
+                    continue
+                for dep_id in update[key].depend_on:
+                    if dep_id in step_ids_will_be_deleted:
+                        continue
+                    if dep_id not in update:
+                        if dep_id not in step_dict:
+                            # `plan-{id}` group or another external reference.
+                            continue
+                        update[dep_id] = step_dict[dep_id].model_copy(deep=True)
+                    update[dep_id].required_by.add(key)
+
             new_add_message = "Below are the newly added steps:\n\n|step_id|name|depend_on|required_by|\n|---|---|---|---|\n"
             modified_message = "Below are the steps whose dependence changed:\n\n|step_id|name|depend_on|required_by|\n|---|---|---|---|\n"
             plan_key = f"plan-{plan_id}"
             for key in update.keys():
-                update[key].depend_on.difference_update(step_ids_will_be_deleted)
                 row_msg = f"|{key}|{update[key].step_id}|{', '.join(update[key].depend_on)}|{', '.join(update[key].required_by)}|\n"
                 if plan_key in key:
                     new_add_message += row_msg

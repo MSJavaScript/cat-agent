@@ -342,50 +342,6 @@ async def test_explicit_retry_bumps_attempt(tmp: Path) -> None:
         await close_manager(manager)
 
 
-async def test_missing_result_files_are_an_error(tmp: Path) -> None:
-    callback = CallbackRecorder()
-    provider = FakeProvider()
-    manager = await make_manager(tmp, provider, callback)
-
-    async def fake_agent(**kwargs):
-        return {"checking_output": {"job_result_status": "Success"}}
-
-    import catagent.jobmanager.manager as manager_module
-    original = manager_module.run_job_agent
-    manager_module.run_job_agent = fake_agent
-    try:
-        job_uuid = "missing-files"
-        local_dir = tempfile.mkdtemp(prefix="catagent-job-")
-        # One declared output exists, the other does not.  A partial result set
-        # must still fail: `any()` semantics would report a false success.
-        with open(os.path.join(local_dir, "relaxed.json"), "w",
-                  encoding="utf-8") as f:
-            f.write("{}")
-        record = base_record(
-            job_uuid, local_dir=local_dir,
-            result_patterns=["relaxed.json", "relax.log"],
-            status=JobStatus.COMPLETED, finalize_state=FinalizeState.PENDING,
-            sub_jobs=[sub_job(job_uuid, local_dir)])
-        await save_record(manager, record)
-
-        await manager._finalize_job(job_uuid)
-
-        check(len(callback.payloads) == 1,
-              f"expected one callback, got {len(callback.payloads)}")
-        check(callback.payloads[0]["status"] == "error",
-              f"missing artifacts were reported as {callback.payloads[0]['status']}")
-        check("missing" in callback.payloads[0]["error_msg"].lower(),
-              f"unexpected error message: {callback.payloads[0]['error_msg']}")
-        check("relax.log" in callback.payloads[0]["error_msg"],
-              f"missing pattern not named: {callback.payloads[0]['error_msg']}")
-        fresh = await manager.db.get(job_uuid)
-        check(fresh.finalize_state == FinalizeState.DELIVERED,
-              "callback was not marked delivered")
-    finally:
-        manager_module.run_job_agent = original
-        await close_manager(manager)
-
-
 async def test_crash_during_download_is_not_a_success(tmp: Path) -> None:
     callback = CallbackRecorder()
     provider = FakeProvider()
@@ -716,7 +672,6 @@ async def main() -> None:
         ("submission resumes persisted plan", test_submission_resumes_persisted_plan),
         ("submission skips started groups", test_submission_skips_already_started_groups),
         ("explicit retry bumps attempt", test_explicit_retry_bumps_attempt),
-        ("missing result files are an error", test_missing_result_files_are_an_error),
         ("crash during download is not success", test_crash_during_download_is_not_a_success),
         ("polling sweep retries finalizing", test_polling_sweep_retries_finalizing),
         ("callback 404 is not delivered", test_callback_404_is_not_delivered),

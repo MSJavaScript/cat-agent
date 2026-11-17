@@ -15,7 +15,7 @@ from catagent.workflow.skill_tool import get_skill_content, get_skill_summaries
 from catagent.tools.neb.reaction_system import ReactionSystemToolSets
 from catagent.tools.other.util_tools import execute_shell, edit_file, read_file
 from .models import ToolNamespace, AgentInterrupt, JobSubmission, AskForArgs, StepNodeContext
-from typing import List,  Dict,  Any, Literal, Optional
+from typing import List,  Dict,  Any, Literal, Optional, Tuple
 import httpx, logging, uuid 
 
 logger = logging.getLogger(__name__)
@@ -42,12 +42,11 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
         return response.json()
     
     @tool 
-    async def submit_job(runtime:ToolRuntime[Any],
-                         job_description: str,
+    async def submit_job(job_description: str,
                          local_dir: str, 
                          provider_name: str,
                          job_env_name: str,
-                         result_patterns: Optional[List[str]] = None ):
+                         result_patterns: Optional[List[str]] = None) -> Tuple[bool, Any]:
         '''
         Submit a job to job manager.
         Args:
@@ -71,17 +70,8 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
 
         metadata = {k: v for k, v in payload.items() if k != "job_uuid"}
 
-        def submission_failed(message: str) -> Command:
-            return Command(
-                update={
-                    "messages": [ToolMessage(
-                        status="error",
-                        name="submit_job",
-                        content=f"Job submission failed. \nError message: {message}. \nMetadata: {metadata}",
-                        tool_call_id=runtime.tool_call_id
-                    )]
-                }
-            )
+        def submission_failed(message: str):
+            return (False, f"Job submission failed. \nError message: {message}. \nMetadata: {metadata}")
 
         try:
             response = await http_client.post(f"{job_manager_url}/submit", json=payload)
@@ -119,20 +109,8 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
         if data.get("status") == "error":
             return submission_failed(data.get("message", "Unknown job manager error."))
 
-        obj = JobSubmission(pending=True,
-                            message=f"Job {job_uuid} is submitted.",
-                            tool_call_id=runtime.tool_call_id,
-                            tool_name="submit_job",
-                            job_uuid=job_uuid)
-        return Command(
-            update={
-                "messages": [ToolMessage(status="success", 
-                                         name="submit_job",
-                                         content=f"Job is submitted.\n Metadata: {metadata}",
-                                         tool_call_id=runtime.tool_call_id)],
-                "interrupts": {runtime.tool_call_id: obj.model_dump(mode='python')}
-            }
-        )
+        return (True, payload)
+    
 
     return [submit_job, get_providers_info]
 
@@ -296,6 +274,35 @@ async def tool_call_wrapper(request:ToolCallRequest, handler):
                             meta_data = ask_args.get("meta_data") or dict())
         
         return Command(update={ "interrupts": {req.tool_call["id"]: obj.model_dump(mode="python")} }) 
+
+    if tool_name == "submit_job":
+        submit_tool = req.tool
+        if submit_tool is None:
+            return Command(update={
+                "messages": [
+                    ToolMessage(status="error",
+                                content="Error: the submit_job tool is not available.",
+                                tool_call_id=req.tool_call["id"],
+                                name=tool_name)]
+            })
+        flag, out = await submit_tool.ainvoke(input=req.tool_call.get("args") or {})
+        if flag: # out is a dict, payload
+            obj = JobSubmission(pending=True,
+                            message=f"Job {out['job_uuid']} is submitted, metadata:\n{out}",
+                            tool_call_id=req.tool_call["id"],
+                            tool_name=tool_name,
+                            job_uuid=out["job_uuid"])
+            
+            return Command( update={ "interrupts": {req.tool_call["id"]: obj.model_dump(mode='python')} } ) 
+        else:
+            return Command(update={
+                "messages": [
+                    ToolMessage(status="error",
+                                content=out,
+                                tool_call_id=req.tool_call["id"],
+                                name=tool_name)]
+            })
+
     #return await handler(req)
     try:
         return await handler(req)

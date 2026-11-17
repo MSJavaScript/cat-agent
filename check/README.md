@@ -12,14 +12,14 @@ The tests are grouped by what they exercise:
 |---|---|---|---|
 | `test_planner_tool.py` | no | no | Planner tool stores a `RawPlan` and reports its id. |
 | `test_register_raw_plan.py` | no | no | `register_raw_plan` in `append` and `replace` mode. |
-| `test_agent_stepnode.py` | no | no | `summary_node` reads `report.md` and extracts a `RawStepResult`. |
+| `test_agent_stepnode.py` | no | no | StepNode finalization asks for a structured `RawStepResult`, retries three times, then falls back to `status="error"`. |
 | `test_agent_state_sync.py` | no | no | Outer↔orchestrator step sync: no lost updates, no stale preparation requests. |
 | `test_jobmanager_recovery.py` | no | embedded | Crash recovery: resumable submission/finalization, callback outbox, local exit codes, per-thread locks. |
 | `test_cli_jobs.py` | no | mocked HTTP | The debug CLI polls `/status/{job_uuid}` and resumes a JobSubmission itself. |
 | `test_app_skill_init.py` | no | no | Skill-index loading/remapping, graph `loaded_skills` seeding, 100-character skill-tool payloads, CLI parser options, and agent logging. |
 | `test_debug_ui.py` | no | no | Bounded event log, `GET /` HTML route (including the new-thread workdir dialog), `/events/{thread_id}`, jobmanager messages, and the unchanged `POST /` callback. |
 | `test_parse_path.py` | no | no | Regex-based `parse_path` extraction from shell operators, redirects, quoted paths, Python `-c`, heredocs, and URLs/comments. |
-| `test_path_guard.py` | no | no | StepNode project-workdir boundary, skill-artifact allowance, `/dev/null`, missing-context handling, and a real StepNode graph receiving its runtime context. |
+| `test_path_guard.py` | no | no | Inline `execute_shell`/`read_file` path policy: project boundary, skill-artifact directories, `/dev/null`, forbidden network commands, `cwd` checks, and a real StepNode graph receiving its runtime context. |
 | `test_agent_orchestrator.py` | yes | mocked HTTP | The orchestrator reads a skill, plans, and registers an append plan. |
 | `test_agent_e2e.py` | yes | yes | Full workflow: orchestrator → router → StepNode → jobmanager callback → final report. |
 | `test_agent_real_jobmanager.py` | yes | yes (real `bohr` + `slurm-1`) | Four concurrent StepNodes submit real VASP single-point jobs; checks downloads, callbacks, and element/atom counts. |

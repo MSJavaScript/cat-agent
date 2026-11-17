@@ -17,7 +17,7 @@ class RawStepResult(BaseModel):
     '''
     status: Literal["success", "error"] = Field(description="If this step success.", default="success")
     summary: str  = Field(description="Summary and error messages (if any) of this step.", default="")
-    output_artifacts: Dict[str, str] = Field(description="Important output files of this step, key is filename or wildcard, value is the purpose of this file.", default_factory=dict)
+    # output_artifacts: Dict[str, str] = Field(description="Important output files of this step, key is filename or wildcard, value is the purpose of this file.", default_factory=dict)
     
 def dict_reducer(current:dict, update:dict) -> dict:
     current = current or dict()

@@ -56,6 +56,10 @@ class InterruptNodeInput(TypedDict, total=False):
     project_workdir: str
     interrupt_ori_id: str 
     interrupt_payload: InterruptState
+    # Outer step snapshot at dispatch time, carried through the pause so the
+    # resumed orchestrator can return a field-level delta (including deleted
+    # steps) instead of overwriting the outer state wholesale.
+    steps: Dict[str, Step]
 
 # The orchestrator is a singleton *per user thread*, not per process.  A global
 # lock serialized every session in the process, which made one user's long
@@ -147,6 +151,12 @@ def _steps_delta(baseline: Dict[str, Step],
     preparation request.  A field-level delta avoids that lost update.
     """
     delta: Dict[str, Any] = dict()
+    # `register_raw_plan(replace)` really deletes Step keys inside the inner
+    # graph.  Those deletions must be propagated too, otherwise the outer
+    # workflow keeps a step that no longer exists and may dispatch it again.
+    for step_id in baseline:
+        if step_id not in current:
+            delta[step_id] = None
     for step_id, step in current.items():
         old = baseline.get(step_id)
         if old is None:
@@ -330,9 +340,7 @@ def create_catagent(model:BaseChatModel,
 
                 step_result = StepResult(status=raw_step_result.get("status", "error"),
                                          processed=False,
-                                         step_id=step_id,
-                                         summary=raw_step_result.get("summary", ""),
-                                         artifacts=raw_step_result.get("output_artifacts", {}))
+                                         summary=raw_step_result.get("summary", ""))
 
                 # 转到router，更新steps_result
                 command = Command(goto="router",
@@ -363,9 +371,7 @@ def create_catagent(model:BaseChatModel,
                 "step_results": {step_id: StepResult(
                     status="error",
                     processed=False,
-                    step_id=step_id,
-                    summary=f"StepNode crashed: {type(exc).__name__}: {exc}\n\n{summary}",
-                    artifacts={})}
+                    summary=f"StepNode crashed: {type(exc).__name__}: {exc}\n\n{summary}")}
             })
 
         mark_step_finished(thread_id, step_id)
@@ -446,22 +452,25 @@ def create_catagent(model:BaseChatModel,
                     "step_id": "",
                     "project_workdir": project_workdir,
                     "interrupt_ori_id": key,
-                    "interrupt_payload": collected_interrupts[key]
+                    "interrupt_payload": collected_interrupts[key],
+                    # Carry the baseline across the pause.  Without it the
+                    # resumed turn cannot tell which steps the orchestrator
+                    # deleted, so a replacement would leave a phantom step in
+                    # the outer workflow.
+                    "steps": baseline_steps,
                 }) for key in collected_interrupts.keys()]
                 return Command(goto=send_list)
 
             lastest_state = await orchestrator_agent.aget_state(config=orchestrator_config)
             post_steps = lastest_state.values.get("steps", {}) or {}
             post_skills = lastest_state.values.get("loaded_skills", {}) or {}
-            if interrupt_resume:
-                # A resumed turn must return the whole inner state: changes made
-                # before the interrupt were never synced to the outer workflow.
-                steps_update = post_steps
-            else:
-                # Only propagate what the orchestrator actually changed; the
-                # rest of the outer `steps` may have advanced concurrently
-                # (preparation done, a stepnode result, ...).
-                steps_update = _steps_delta(baseline_steps, post_steps)
+            # Only propagate what the orchestrator actually changed; the rest of
+            # the outer `steps` may have advanced concurrently (preparation
+            # done, a stepnode result, ...).  `_steps_delta` also emits `None`
+            # for steps the orchestrator deleted.  A resume without a carried
+            # baseline falls back to treating every inner step as new, which is
+            # the old whole-state behaviour.
+            steps_update = _steps_delta(baseline_steps, post_steps)
 
             return Command(goto="node_set_flag",
                            update={
@@ -513,7 +522,10 @@ def create_catagent(model:BaseChatModel,
         if state["source"] == "orchestrator":
             return Command(goto=Send("orchestrator_node",
                                      arg={"interrupt_resume": resume_map,
-                                          "project_workdir": state.get("project_workdir", "")}))
+                                          "project_workdir": state.get("project_workdir", ""),
+                                          # Keep the dispatch-time baseline so
+                                          # the delta can propagate deletions.
+                                          "steps": state.get("steps") or {}}))
         else:
             # 这里不需要设置workdir，直接resume，原来的workdir不会被覆盖
             mark_step_scheduled(thread_id, state.get("step_id", ""))

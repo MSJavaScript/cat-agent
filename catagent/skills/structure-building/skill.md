@@ -10,7 +10,7 @@ metadata:
 
 # Build simple structures with ase and pymatgen 
 
-For structure building, also see the "structure_building_tools" collection of StepNode, see "stepnode-tools" skill.
+For structure building, also see the "structure_building_tools" collection of StepNode in "stepnode-tools" skill.
 
 Building structure is a difficult task. `ase` and `pymatgen` only provide some simple and standard functions for structure building, for complex cases, you should use specialized tools or ask the user to provide structures. This document demonstrates examples of building simple structures using `ase` and `pymatgen`, and provides some simple wrapper scripts in the `scripts` dir for calling.
 

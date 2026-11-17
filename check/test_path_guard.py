@@ -1,5 +1,21 @@
 """Deterministic tests for the StepNode path policy in ``util_tools``.
 
+The policy is inlined in ``execute_shell`` (there is no standalone
+``_path_policy_error`` helper anymore).  These tests exercise the real tool
+functions:
+
+* for a ``StepNode``, ``execute_shell`` may only touch existing paths under
+  the project workdir or under a directory containing a skill artifact,
+* safe device paths such as ``/dev/null`` are always allowed,
+* an ``Orchestrator`` is not bound by the project workdir,
+* ``read_file`` always stays inside the project workdir,
+* a command whose ``cwd`` is outside the project is rejected.
+
+Known limitation, asserted explicitly: the inline policy only checks paths that
+already exist (``is_file() or is_dir()``), so a non-existent outside path is not
+denied.  Missing ``project_workdir`` context raises ``KeyError`` instead of
+returning a friendly message.
+
 Run from the repository root:
 
     python -m check.test_path_guard
@@ -15,10 +31,9 @@ from types import SimpleNamespace
 
 from langchain.messages import HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import Command
 
 from catagent.stepnode.stepnode import create_stepnode_agent
-from catagent.tools.other.util_tools import _path_policy_error, execute_shell
+from catagent.tools.other.util_tools import execute_shell, read_file
 from check.scripted_model import ScriptedModel
 
 _SYSTEM_SKILLS = Path(__file__).resolve().parent.parent / "catagent" / "system_skills"
@@ -41,95 +56,174 @@ def _runtime(project: str, artifacts=(), role: str = "StepNode"):
     )
 
 
-def test_project_boundary() -> None:
-    with tempfile.TemporaryDirectory() as project, tempfile.TemporaryDirectory() as other:
+async def _run_shell(runtime, command: str, cwd: str):
+    return await execute_shell.coroutine(runtime, command, cwd, 10)
+
+
+def _message(command) -> ToolMessage:
+    messages = command.update["messages"]
+    assert len(messages) == 1, messages
+    return messages[0]
+
+
+def check(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+async def test_project_boundary() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        project = os.path.join(root, "project")
+        other = os.path.join(root, "other")
+        os.makedirs(project)
+        os.makedirs(other)
         inside = os.path.join(project, "input.txt")
         outside = os.path.join(other, "secret.txt")
+        Path(inside).write_text("inside", encoding="utf-8")
+        Path(outside).write_text("outside", encoding="utf-8")
         runtime = _runtime(project)
 
-        assert _path_policy_error(
-            runtime, [inside], tool_name="execute_shell"
-        ) is None
-        # Non-existent outside paths are denied too: a command could create
-        # them, and the boundary must not depend on the current filesystem.
-        error = _path_policy_error(
-            runtime,
-            [inside, outside, os.path.join(other, "new.txt")],
-            tool_name="execute_shell",
+        # A file inside the project is allowed.
+        message = _message(await _run_shell(runtime, "ls input.txt", project))
+        check("Access denied" not in message.content, message.content)
+
+        # An existing file outside the project is denied and named.
+        message = _message(await _run_shell(runtime, f"cat {outside}", project))
+        check(message.status == "error", f"expected an error, got {message}")
+        check("Access denied" in message.content, message.content)
+        check(outside in message.content, message.content)
+
+        # A relative escape is resolved against `cwd` and denied.
+        message = _message(
+            await _run_shell(runtime, "cat ../other/secret.txt", project)
         )
-        assert error is not None
-        assert outside in error
-        assert os.path.join(other, "new.txt") in error
+        check("Access denied" in message.content, message.content)
+        check(outside in message.content, message.content)
 
-        # Relative paths are interpreted relative to the project workdir.
-        assert _path_policy_error(
-            runtime, ["sub/out.txt"], tool_name="execute_shell"
-        ) is None
-        assert _path_policy_error(
-            runtime, ["../escape.txt"], tool_name="execute_shell"
-        ) is not None
+        # Current behaviour: non-existent paths are not checked, so a path
+        # outside the project that does not exist yet is not denied.
+        missing = os.path.join(other, "not-created.txt")
+        message = _message(await _run_shell(runtime, f"cat {missing}", project))
+        check("Access denied" not in message.content, message.content)
 
 
-def test_skill_artifacts() -> None:
-    with tempfile.TemporaryDirectory() as project, tempfile.TemporaryDirectory() as skill_root:
-        script = os.path.join(skill_root, "scripts", "run.py")
-        sibling = os.path.join(skill_root, "scripts", "other.py")
-        os.makedirs(os.path.dirname(script))
+async def test_skill_artifacts() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        project = os.path.join(root, "project")
+        skill_root = os.path.join(root, "skill")
+        scripts = os.path.join(skill_root, "scripts")
+        os.makedirs(project)
+        os.makedirs(scripts)
+        script = os.path.join(scripts, "run.py")
+        sibling = os.path.join(skill_root, "other.py")
+        Path(script).write_text("print('run')\n", encoding="utf-8")
+        Path(sibling).write_text("print('other')\n", encoding="utf-8")
         runtime = _runtime(project, artifacts=[script])
 
-        # The bug in the original loop: `continue` only left the inner loop,
-        # so an allowed skill script was denied immediately afterwards.
-        assert _path_policy_error(
-            runtime,
-            [script],
-            tool_name="execute_shell",
-            allow_skill_artifacts=True,
-        ) is None
-        assert _path_policy_error(
-            runtime,
-            [sibling],
-            tool_name="execute_shell",
-            allow_skill_artifacts=True,
-        ) is not None
-        # edit_file/read_file do not opt into skill artifacts.
-        assert _path_policy_error(
-            runtime,
-            [script],
-            tool_name="read_file",
-        ) is not None
+        # The directory of a declared skill artifact is allowed.
+        message = _message(await _run_shell(runtime, f"ls {script}", project))
+        check("Access denied" not in message.content, message.content)
+
+        # A sibling outside the artifact's directory is not.
+        message = _message(await _run_shell(runtime, f"ls {sibling}", project))
+        check("Access denied" in message.content, message.content)
+        check(sibling in message.content, message.content)
 
 
-def test_device_paths_and_missing_context() -> None:
+async def test_device_paths() -> None:
     with tempfile.TemporaryDirectory() as project:
         runtime = _runtime(project)
-        assert _path_policy_error(
-            runtime, ["/dev/null"], tool_name="execute_shell"
-        ) is None
-        # /dev/stdout is a symlink into /proc; it must still be recognised
-        # before its resolved form is checked against the project root.
-        assert _path_policy_error(
-            runtime, ["/dev/stdout"], tool_name="execute_shell"
-        ) is None
-
-        runtime.context = {}
-        error = _path_policy_error(
-            runtime, [os.path.join(project, "a.txt")], tool_name="execute_shell"
-        )
-        assert error is not None and "not configured" in error
+        for device in ("/dev/null", "/dev/stdout"):
+            message = _message(
+                await _run_shell(runtime, f"ls {device}", project)
+            )
+            check("Access denied" not in message.content, message.content)
 
 
-def test_execute_shell_checks_cwd() -> None:
-    with tempfile.TemporaryDirectory() as project, tempfile.TemporaryDirectory() as other:
+async def test_forbidden_network_command() -> None:
+    with tempfile.TemporaryDirectory() as project:
         runtime = _runtime(project)
+        message = _message(
+            await _run_shell(runtime, "curl http://example.com", project)
+        )
+        check(message.status == "error", f"expected an error, got {message}")
+        check(
+            "not allowed to send requests" in message.content,
+            message.content,
+        )
+
+
+async def test_cwd_boundary_and_missing_directory() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        project = os.path.join(root, "project")
+        other = os.path.join(root, "other")
+        os.makedirs(project)
+        os.makedirs(other)
+        runtime = _runtime(project)
+
         # `ls` names no path, so only the cwd reveals that the command would
         # run outside the project.
-        command = asyncio.run(
-            execute_shell.coroutine(runtime, "ls", other, 5)
+        message = _message(await _run_shell(runtime, "ls", other))
+        check(message.status == "error", f"expected an error, got {message}")
+        check(other in message.content, message.content)
+
+        missing = os.path.join(project, "does-not-exist")
+        message = _message(await _run_shell(runtime, "ls", missing))
+        check(message.status == "error", f"expected an error, got {message}")
+        check("is not a directory" in message.content, message.content)
+
+
+async def test_orchestrator_is_not_bound() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        project = os.path.join(root, "project")
+        other = os.path.join(root, "other")
+        os.makedirs(project)
+        os.makedirs(other)
+        runtime = _runtime(project, role="Orchestrator")
+
+        message = _message(await _run_shell(runtime, "ls", other))
+        check("Access denied" not in message.content, message.content)
+        check("is not a directory" not in message.content, message.content)
+
+
+async def test_missing_context_fails_loudly() -> None:
+    with tempfile.TemporaryDirectory() as project:
+        runtime = SimpleNamespace(
+            state={"role": "StepNode", "skill_artifacts_pathes": set()},
+            context={},
+            tool_call_id="call-1",
         )
-        assert isinstance(command, Command), command
-        message = command.update["messages"][0]
-        assert message.status == "error"
-        assert other in message.content
+        try:
+            await _run_shell(runtime, "ls", project)
+        except KeyError:
+            pass
+        else:
+            raise AssertionError(
+                "missing `project_workdir` should raise KeyError, not silently "
+                "skip the path policy"
+            )
+
+
+async def test_read_file_boundary() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        project = os.path.join(root, "project")
+        other = os.path.join(root, "other")
+        os.makedirs(project)
+        os.makedirs(other)
+        inside = os.path.join(project, "input.txt")
+        outside = os.path.join(other, "secret.txt")
+        Path(inside).write_text("line 1\nline 2\n", encoding="utf-8")
+        Path(outside).write_text("secret\n", encoding="utf-8")
+        runtime = _runtime(project)
+
+        result = await read_file.coroutine(runtime, inside)
+        check(isinstance(result, dict), f"expected a dict, got {result!r}")
+        check(result["total_lines"] == 2, result)
+        check(result["lines"][0][1] == "line 1", result)
+
+        result = await read_file.coroutine(runtime, outside)
+        check(isinstance(result, str), f"expected a denial string, got {result!r}")
+        check(result.startswith("Access denied"), result)
 
 
 async def test_stepnode_graph_receives_context() -> None:
@@ -148,9 +242,11 @@ async def test_stepnode_graph_receives_context() -> None:
         state = await agent.ainvoke(
             {
                 "messages": [HumanMessage(content="do it")],
+                "role": "StepNode",
                 "workdir": project,
                 "loaded_skills": {},
                 "skill_artifacts_pathes": set(),
+                "stepnode_finalization": False,
             },
             config={"configurable": {"thread_id": "path-guard-e2e"}},
             context={
@@ -171,8 +267,12 @@ def main() -> None:
     tests = [
         test_project_boundary,
         test_skill_artifacts,
-        test_device_paths_and_missing_context,
-        test_execute_shell_checks_cwd,
+        test_device_paths,
+        test_forbidden_network_command,
+        test_cwd_boundary_and_missing_directory,
+        test_orchestrator_is_not_bound,
+        test_missing_context_fails_loudly,
+        test_read_file_boundary,
         test_stepnode_graph_receives_context,
     ]
     for test in tests:

@@ -213,7 +213,7 @@ async def router(state:WorkflowState, config:RunnableConfig):
     update_step_results = dict()
 
     update_failed_steps = dict()
-    message_for_failed_steps = "Correction request from Router:\nThe following steps failed. Please analyze the problem and fix it, and update `state.md`. To retry, you have two choices: (1) Revise the step solution and set status = 'pending', this can reuse chat history of StepNode but likely pollute the context and make StepNode fail again. (2) Set the old step status = 'deleted' to delete it, and create a new 'pending' step (call `create_step`) with different `step_id`. In this case, you must call `set_step_dependence` to set the workflow dependence. \n\n"
+    message_for_failed_steps = "Correction request from Router:\nThe following steps may failed. If it really failed, please analyze the problem and fix it, and update `state.md`. To retry, you have two choices: (1) Revise the step solution and set status = 'pending', this can reuse chat history of StepNode but likely pollute the context and make StepNode fail again. (2) Set the old step status = 'deleted' to delete it, and create a new 'pending' step (call `create_step`) with different `step_id`. In this case, you must call `set_step_dependence` to set the workflow dependence. \n\n"
 
     update_success_steps = dict()
     message_for_success_steps = "Status logging request from Router:\n The following steps complete successfully. Please call `set_step_status` to set their status = 'done' so that subsequent steps can be prepared, and log the status in `state.md`.\n\n"
@@ -227,9 +227,20 @@ async def router(state:WorkflowState, config:RunnableConfig):
         # its liveness record has served its purpose.
         clear_step_run(thread_id, key)
 
-        # key 一定会在step_status 中，因为orchestrator只能设置标志deleted，无法真的删除step
-        assert key in steps_view
-       
+        if key not in steps_view:
+            # `register_raw_plan(replace)` really removes Step keys from the
+            # shared state, and it may do so while this StepNode is running or
+            # while its result is still queued.  The step no longer exists, so
+            # there is nothing to correct; drop the result instead of
+            # resurrecting a deleted step.
+            logger.warning(
+                "Router: dropping result for step %s because the step was "
+                "deleted (register_raw_plan replace).", key
+            )
+            update_step_results[key] = {"processed": True}
+            continue
+
+        assert key in steps
         if result.status == "error":
             update_step_results[key] = {"processed": True}
             steps_view[key]["status"] = "deleted"

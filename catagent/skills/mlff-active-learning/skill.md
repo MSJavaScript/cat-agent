@@ -11,7 +11,7 @@ metadata:
 --- 
 # Obtain high-precision MLFF through finetuning and active learning 
 
-Finetuing is a fast method to get accurate MLFF from a pre-trained model. This skill explains how to iteratively finetune a MLFF, especially the application on catalysis computation.  The basic idea is a sampling & DFT labelling → finetuning MLFF → sampling & DFT labelling loop.
+Finetuing is a fast method to get accurate MLFF from a pre-trained model. This skill explains how to iteratively finetune a MLFF, especially the application on catalysis computation.  The basic workflow is a sampling & DFT labelling → finetuning MLFF → sampling & DFT labelling loop.
 
 ## Workflow in catalysis computation
 
@@ -68,6 +68,8 @@ Then you can submit a batch job including all the `sp_*` dirs and get the initia
 ```bash
 python3 gather_dft_results.py -o results.extxyz
 ```
+
+Only ionic steps whose electronic loop converged (`|dE| < EDIFF`) are kept, and near-duplicate configurations are removed before writing. Use `--first/--last/--random` to select the steps to keep from each OUTCAR (`--first 5` is used when none of them is given), `--seed` to make a random selection reproducible, and `--min_dist`/`--metric` to control deduplication (default: 0.1 Å per-atom RMSD). OUTCARs that cannot be parsed or lack the `EDIFF` line are skipped with a warning; the command exits with a non-zero code when nothing can be collected.
 
 ### 2. Finetune MLFF
 
@@ -190,6 +192,8 @@ python3 check_traj.py --traj opt.traj -o neb_out.extxyz  --neb -n 5
 ```
 use `--nstep_thres` to set the threshold of reasonable steps.
 
+The extracted `extxyz` contains geometry only: energies and forces evaluated by the MLFF are not copied, so the file can be sent to DFT without stale labels. Use `--seed` (default 42) for reproducible sampling, and `--sample uniform` to spread the extracted frames evenly over the trajectory (the last step is always included). For NEB, `-n` is the number of structures extracted from *each* intermediate image, and the number of images is inferred from the repeated initial-state frames; pass `--nimages` explicitly if an image coincides with the initial state. `check_traj.py` exits with code 0 when no structure needs to be extracted and code 1 when the trajectory is broken or unreadable, so batch scripts can tell "converged" from "failed".
+
 You can use a bash script like the following to extract structures and prepare VASP inputs in batch.
 
 ```bash
@@ -199,15 +203,15 @@ do
 
   python3 check_traj.py \
     --traj ${traj} \
-    --save_name=${name}_ini_ex -n 3
+    -o ${name}_ini_ex.extxyz -n 3
 
   python3 check_traj.py \
     --traj ${name}_fin_opt.traj \
-    --save_name=${name}_fin_ex -n 3
+    -o ${name}_fin_ex.extxyz -n 3
   
   python3 check_traj.py \
     --traj ${name}_neb.traj \
-    --save_name=${name}_neb_ex -n 3
+    -o ${name}_neb_ex.extxyz --neb -n 3
   
   cat ${name}_ini_ex.extxyz ${name}_fin_ex.extxyz ${name}_neb_ex.extxyz > total_${name}.extxyz
 
@@ -220,7 +224,7 @@ done
 
 When DFT job is done, we get another training dataset, say "dataset2.hdf5". Then we finetune a new MLFF with "dataset1.hdf5" and "dataset2.hdf5".  Always finetune from scratch. This guarantees that both datasets are used in the same number of epoches during training. 
 
-We repeat the steps 2,3 and 4, until all the structure relaxations and NEBs converge within a reasonable range of steps, that is, `check_traj.py` cannot extract structures from the trajectories anymore.
+We repeat the steps 2,3 and 4, until all the structure relaxations and NEBs converge within a reasonable range of steps, that is, `check_traj.py` cannot extract structures from the trajectories anymore (it prints `No structures are extracted.` and exits with code 0).
 
 
 ## Workflow for general systems
@@ -286,7 +290,7 @@ We then extract structures from the `*.traj` files.
 for traj in *.traj
 do
     python3 check_traj.py --traj ${traj} \
-    -o extract_md.extxyz --nstep_thres 1 -n 20
+    -o extract_md.extxyz --nstep_thres 1 -n 20 --sample uniform
     # Prepare VASP inputs ...
 done
 ```
@@ -365,8 +369,8 @@ A `state.md` file should be maintained in top level dir to log the working state
 Below are the related scripts in `scripts` dir. Run these scripts without parameters or with `-h` to get the helps.
 | Name | Purpose|
 | ---- | ---- |
-|check_traj.py| Check the trajectory and extract structures from it if it is problematic. |
-|gather_dft_results.py| Collect the calculated structures into an extxyz file|
+|check_traj.py| Check the trajectory and extract structures from it if it is problematic. Writes geometry-only extxyz (no MLFF labels) and exits with code 1 on a broken input. |
+|gather_dft_results.py| Collect the converged (`abs(dE) < EDIFF`), deduplicated structures from OUTCARs into an extxyz file|
 |rattle_configs.py|Perturb the structures to enlarge the configuration space |
 |run_ase_neb_with_dpa.py| Run structure relaxation (cell is fixed) and NEB with DPA force field|
 |run_ase_npt_md_with_dpa.py|Run structure relaxation (cell can be relaxed ) and NPT MD with DPA MLFF.|

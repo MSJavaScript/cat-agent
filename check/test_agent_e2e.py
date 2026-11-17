@@ -231,6 +231,22 @@ async def run_workflow(thread_id: str, workdir: Path,
         await callback.stop()
 
 
+def _dotenv_path() -> Path:
+    """Return the same credentials file that `check.common.load_env` uses."""
+    candidates = [
+        Path("/home/luandong/bin/.env"),
+        REPO_ROOT / ".env",
+        REPO_ROOT / "catagent" / "jobmanager" / ".env",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FileNotFoundError(
+        "No .env file found; create one of "
+        + ", ".join(str(path) for path in candidates)
+    )
+
+
 def start_jobmanager(log_path: Path) -> subprocess.Popen:
     env = os.environ.copy()
     env["PATH"] = f"{MOCK_BIN}{os.pathsep}{env.get('PATH', '')}"
@@ -249,6 +265,7 @@ def start_jobmanager(log_path: Path) -> subprocess.Popen:
          "--host", "127.0.0.1",
          "--port", str(JOB_MANAGER_PORT),
          "--log", str(log_path),
+         "--dotenv", str(_dotenv_path()),
          "--level", "info"],
         cwd=str(REPO_ROOT),
         env=env,
@@ -292,7 +309,7 @@ def main() -> None:
     for step_id in sorted(steps):
         step = steps[step_id]
         print(f"  {step_id}: status={step.status} "
-              f"preparation={step.preparation_stage} workdir={step.workdir}")
+              f"preparation_done={step.preparation_done} workdir={step.workdir}")
 
     found = sorted(str(p.relative_to(workdir)) for p in workdir.rglob("*")
                    if p.is_file())

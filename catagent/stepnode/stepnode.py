@@ -12,9 +12,79 @@ from langgraph.prebuilt import ToolNode
 from .models import StepNodeState, StepNodeContext, InterruptState, RawStepResult
 from .init_tools import get_tool_node, TOOLS_BY_NAME
 from typing import List, Dict, Any
-import copy, httpx, json, logging, os
+import copy, httpx, json, logging, os, tempfile, time
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_model_request(model: BaseChatModel,
+                             messages: List[Any],
+                             tools: List[BaseTool]) -> Dict[str, Any]:
+    """Build a JSON-safe approximation of the payload sent to the provider."""
+    from langchain_core.messages.utils import convert_to_openai_messages
+
+    tool_payload = []
+    for tool in tools:
+        try:
+            parameters = (tool.tool_call_schema.model_json_schema()
+                          if tool.tool_call_schema else {})
+        except Exception:
+            parameters = {}
+        tool_payload.append({
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description or "",
+                "parameters": parameters,
+            },
+        })
+
+    return {
+        "model": (getattr(model, "model_name", None)
+                  or getattr(model, "model", None)),
+        "messages": convert_to_openai_messages(messages),
+        "tools": tool_payload,
+    }
+
+
+def _dump_failed_model_request(model: BaseChatModel,
+                               messages: List[Any],
+                               tools: List[BaseTool],
+                               error: BaseException) -> str | None:
+    """Write the failing request to a temp file and return its path.
+
+    This is only called after a provider error, so it never adds overhead to
+    normal runs.  The dump makes it possible to inspect the exact request body
+    (message roles/contents, tool schemas, model name) that the provider
+    rejected.
+    """
+    try:
+        payload = _serialize_model_request(model, messages, tools)
+    except Exception:
+        logger.exception("Could not serialize the failed StepNode model request")
+        payload = {"serialization_error": True}
+
+    path = os.path.join(
+        tempfile.gettempdir(),
+        f"catagent_stepnode_llm_error_{time.time_ns()}_{os.getpid()}.json",
+    )
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    "payload": payload,
+                },
+                file,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+    except Exception:
+        logger.exception("Could not write the failed StepNode model request")
+        return None
+    return path
 
 
 def _drop_defaults(node):
@@ -120,20 +190,31 @@ def create_model_and_tool_node(model:BaseChatModel,
     def model_node(state:StepNodeState):
         if state["stepnode_finalization"]:
             prompt = "Work finalization. Determine the final `status` (success or error) and summary this run. NOTE: Generate a structured `RawStepResult` object instead of plain text."
+            request_messages = [SystemMessage(content=system_prompt), *state["messages"], HumanMessage(content=prompt)]
 
-            for _ in range(3):
+            for attempt in range(1, 4):
                 try:
                     result = model.with_structured_output(RawStepResult).invoke(
-                            [SystemMessage(content=system_prompt), *state["messages"], HumanMessage(content=prompt)])
+                            request_messages)
 
                     result = RawStepResult.model_validate(result)
                     break
                 except Exception as e:
-                    pass
+                    dump_path = None
+                    if attempt == 3:
+                        dump_path = _dump_failed_model_request(model, request_messages, [], e)
+                    logger.warning(
+                        "StepNode finalization attempt %d/3 failed: %s: %s%s",
+                        attempt, type(e).__name__, e,
+                        f" request_dump={dump_path}" if dump_path else "",
+                        exc_info=True,
+                    )
             else:
+                logger.error(
+                    "StepNode finalization failed after 3 attempts; returning an "
+                    "error RawStepResult. The job may have failed, maybe not.")
                 result = RawStepResult(status="error",
-                                       summary="Cannot extract structured output from messages of StepNode, the job may failed, maybe not.",
-                                       output_artifacts=dict())
+                                       summary="Cannot extract structured output from messages of StepNode, the job may failed, maybe not.")
 
             return {"step_result": result} 
 
@@ -142,7 +223,25 @@ def create_model_and_tool_node(model:BaseChatModel,
         existing_names = {t.name for t in static_tools}
         extra = [TOOLS_BY_NAME[name] for name in accessible if name not in existing_names]
         tools = [*static_tools, *extra]
-        response = model.bind_tools(tools).invoke([SystemMessage(content=system_prompt), *state["messages"]])
+        request_messages = [SystemMessage(content=system_prompt), *state["messages"]]
+        try:
+            response = model.bind_tools(tools).invoke(request_messages)
+        except Exception as e:
+            dump_path = _dump_failed_model_request(model, request_messages, tools, e)
+            logger.error(
+                "StepNode model call failed: model=%r messages=%d tools=%d "
+                "message_chars=%d role=%r error=%s: %s request_dump=%s",
+                getattr(model, "model_name", None) or getattr(model, "model", None),
+                len(request_messages),
+                len(tools),
+                sum(len(str(message.content)) for message in request_messages),
+                (state.get("role") if isinstance(state, dict) else None),
+                type(e).__name__,
+                e,
+                dump_path,
+                exc_info=True,
+            )
+            raise
         return {"messages": [response]}
 
     return model_node, tool_node

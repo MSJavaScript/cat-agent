@@ -169,8 +169,13 @@ async def main() -> None:
     check("plan-1:step-1:relax_b_v2" in steps, "new relax_b must exist")
     check(steps["plan-1:step-0:relax_a_v2"].depend_on == {"plan-0:step-0:prepare"},
           "new relax_a should inherit prepare dependence")
-    check(steps["plan-1:step-1:relax_b_v2"].depend_on == {"plan-0:step-0:prepare"},
-          "new relax_b should inherit prepare dependence")
+    check(steps["plan-1:step-1:relax_b_v2"].depend_on == {
+        "plan-0:step-0:prepare", "plan-1:step-0:relax_a_v2",
+    }, "new relax_b should inherit prepare and the new-plan topology dependence")
+    check(steps["plan-0:step-0:prepare"].required_by == {
+        "plan-1:step-0:relax_a_v2", "plan-1:step-1:relax_b_v2",
+    }, f"prepare.required_by was not rewired: "
+       f"{steps['plan-0:step-0:prepare'].required_by}")
     check(steps["plan-0:step-3:analyze"].depend_on == {
         "plan-1:step-0:relax_a_v2",
         "plan-1:step-1:relax_b_v2",
@@ -189,6 +194,9 @@ async def main() -> None:
     check(new_id in steps, "combined relax step must exist")
     check(steps[new_id].depend_on == {"plan-0:step-0:prepare"},
           f"combined step should depend on prepare, got {steps[new_id].depend_on}")
+    check(steps["plan-0:step-0:prepare"].required_by == {new_id},
+          f"prepare.required_by should point at the combined step, got "
+          f"{steps['plan-0:step-0:prepare'].required_by}")
     check(steps["plan-0:step-3:analyze"].depend_on == {
         new_id, "plan-9:step-0:external",
     }, f"analyze should now depend on the combined step and its external "
