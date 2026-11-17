@@ -1,13 +1,23 @@
-from langchain.tools import tool
-import asyncio, aiofiles, os
-from typing import List, Optional, Literal
-from datetime import datetime
 from langchain.messages import ToolMessage
 from langgraph.types import Command
-from langchain.tools import  ToolRuntime
+from langchain.tools import  ToolRuntime, tool
+
+import asyncio, aiofiles, os, shlex 
+from typing import List, Optional, Literal, Any
+from datetime import datetime
+from .parse_path import parse_path
+from pathlib import Path
+
+
+_SAFE_DEVICE_PATHS = {
+    "/dev/null",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+}
 
 @tool
-async def execute_shell(runtime:ToolRuntime, command: str, cwd: str = None, timeout: int = 60) -> dict:
+async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: str, timeout: int = 60) -> dict:
     """
     Execute a shell command. Tips: Use `cat`, `head`, `grep`, `sed`, `awk` or `echo` etc. to quickly read or edit files. 
     Args:
@@ -15,6 +25,70 @@ async def execute_shell(runtime:ToolRuntime, command: str, cwd: str = None, time
         cwd: Current working directory.
         timeout: Time limit for command execution (in seconds).
     """
+    forbidden = {'curl', 'wget', 'requests', 'httpx', 'aiohttp', 'urllib3'}
+    for item in shlex.split(command):
+        for forbid_item in forbidden:
+            if forbid_item in item:
+                return Command(update={
+                    "messages": [ToolMessage(
+                                    status="error",
+                                    content=f"Error: Find {forbid_item} in command, you are not allowed to send requests by execute_shell.",
+                                    tool_call_id=runtime.tool_call_id,
+                                    name="execute_shell"
+                                )]
+                })
+
+    if not os.path.isdir(cwd):
+        return Command(update={
+            "messages": [ToolMessage(
+                            status="error",
+                            content=f"Error: {cwd} is not a directory.",
+                            tool_call_id=runtime.tool_call_id,
+                            name="execute_shell"
+                        )]
+        })
+
+    # 对于StepNode 进行路径检测。StepNode 最容易出现到处搜索文件debug的行为
+    # Orchestrator因为要搜集信息所以允许它这样做
+    if runtime.state["role"] == "StepNode":
+        project_workdir = Path(os.path.expandvars(os.path.expanduser(runtime.context["project_workdir"])))
+        project_workdir = project_workdir.resolve()
+
+        skill_artifacts_pathes = runtime.state.get("skill_artifacts_pathes", set())
+        allowed_dirs = { Path(os.path.expandvars(os.path.expanduser(os.path.dirname(p)))).resolve() 
+                        for p in skill_artifacts_pathes }
+        allowed_dirs.add(project_workdir)
+
+
+        pathes = [cwd]
+        pathes.extend(parse_path(command, cwd))
+        not_allowed = False
+        bad_path = ""
+
+        for p in pathes:
+            if p in _SAFE_DEVICE_PATHS:
+                continue
+            path = Path(os.path.expandvars(os.path.expanduser(p)))
+            if path.is_file() or path.is_dir():
+                resolved_path = path.resolve()
+                for allowed_dir in allowed_dirs:
+                    if resolved_path.is_relative_to(allowed_dir):
+                        break 
+                else:
+                    bad_path = str(path)
+                    not_allowed = True 
+                    break 
+
+        if not_allowed:
+            error_msg = f"Access denied. Cannot access {bad_path} execute_shell is only allowed to access the content under project workdir {project_workdir} Please check if the available agent tools or skill scripts can do the job. If not, you should stop and report the error to Orchestrator."
+            return Command(update={
+                            "messages": [ToolMessage(
+                                status="error",
+                                content=error_msg,
+                                tool_call_id=runtime.tool_call_id,
+                                name="execute_shell"
+                            )]
+                })
 
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -43,6 +117,7 @@ async def execute_shell(runtime:ToolRuntime, command: str, cwd: str = None, time
             "stderr": stderr.decode() if stderr else "",
         }
 
+        # 对于包引用错误，提示向用户寻求帮助，否则agent会像coding agent一样开始debug
         inject_message = ""
         if "ImportError" in content["stderr"] or "ModuleNotFoundError" in content["stderr"]:
             inject_message = "You may call `pause_to_ask` to ask user for help." 
@@ -81,6 +156,7 @@ def _with_timestamp(lines: List[str], add_timestamp: bool) -> List[str]:
 
 @tool
 async def edit_file(
+    runtime:ToolRuntime[Any],
     file_path: str,
     lines: List[str],
     mode: Literal['append', 'overwrite', 'replace', 'insert'] = 'append',
@@ -101,6 +177,12 @@ async def edit_file(
         end_line: End line number. `None` means the end of the line.
         add_timestamp: Add timestamp at the start of first line.
     '''
+    project_workdir = Path(os.path.expandvars(os.path.expanduser(runtime.context["project_workdir"])))
+    project_workdir = project_workdir.resolve()
+
+    if not Path(file_path).resolve().is_relative_to(project_workdir):
+        return f"Access denied. You are only allowed to edit files under project dir {project_workdir}."
+
     if not os.path.isfile(file_path):
         dirname = os.path.dirname(file_path)
         if not os.path.isdir(dirname):
@@ -155,6 +237,7 @@ async def edit_file(
 
 @tool
 async def read_file(
+    runtime:ToolRuntime[Any],
     file_path: str,
     start_line: Optional[int] = None,
     end_line: Optional[int] = None,
@@ -170,6 +253,11 @@ async def read_file(
         line range that was read, and `lines`, a list of `[line_number, line_content]`
         pairs so that every line number maps exactly to its content.
     '''
+    project_workdir = Path(os.path.expandvars(os.path.expanduser(runtime.context["project_workdir"])))
+    project_workdir = project_workdir.resolve()
+    if not Path(file_path).resolve().is_relative_to(project_workdir):
+        return f"Access denied. You are only allowed to read files under project dir {project_workdir}."
+
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 

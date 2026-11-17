@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -82,7 +83,26 @@ def _resume_from_request(
     return thread_id, Command(resume=response)
 
 
-def _normal_input(req: ChatRequest) -> tuple[str, Any]:
+def _resolve_workdir(workdir: str | None) -> str | None:
+    """Normalize a requested project workdir, validating that it is a dir."""
+    if workdir is None:
+        return None
+    workdir = workdir.strip()
+    if not workdir:
+        return None
+    path = Path(os.path.expandvars(os.path.expanduser(workdir))).resolve()
+    if not path.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"workdir does not exist or is not a directory: {path}",
+        )
+    return str(path)
+
+
+def _normal_input(
+    req: ChatRequest,
+    workdir: str | None = None,
+) -> tuple[str, Any]:
     """Build the thread id and initial state for a new user message."""
     if req.message is None or len(req.message) == 0:
         raise HTTPException(
@@ -95,6 +115,11 @@ def _normal_input(req: ChatRequest) -> tuple[str, Any]:
         "finalization": False,
         "orchestrator_is_working": False,
     }
+    # Do not overwrite the workdir persisted with an existing thread when a
+    # follow-up message omits it.  A brand-new thread always gets one: the
+    # value requested by the client, or the server process cwd.
+    if workdir is not None or not req.thread_id:
+        agent_input["project_workdir"] = workdir or os.path.abspath(os.getcwd())
     return thread_id, agent_input
 
 
@@ -108,6 +133,7 @@ async def build_app(
     db_path: str,
     job_manager_url: str,
     skill_index_json: str | None = None,
+    recursion_limit: int | None = None,
 ) -> FastAPI:
     """Create the cat-agent HTTP application and its runtime resources."""
     # Resolve through the package facade so ``catagent.app.build_runtime``
@@ -136,6 +162,9 @@ async def build_app(
     )
     app.state.catagent = catagent
     app.state.httpx_client = httpx_client
+    # LangGraph superstep bound for every graph invocation (outer workflow,
+    # orchestrator and each StepNode).  None means "use LangGraph's default".
+    app.state.recursion_limit = recursion_limit
     # A stateless client may resume with only an interrupt value; remember the
     # most recent thread id as a convenience for that single-user debug case.
     app.state.last_thread_id = None
@@ -191,11 +220,12 @@ async def build_app(
     @app.post("/")
     async def chat(req: ChatRequest):
         last_thread_id = app.state.last_thread_id
+        workdir = _resolve_workdir(req.workdir)
 
         if req.interrupt_id is not None or req.interrupt_resume is not None:
             thread_id, agent_input = _resume_from_request(req, last_thread_id)
         else:
-            thread_id, agent_input = _normal_input(req)
+            thread_id, agent_input = _normal_input(req, workdir)
 
         app.state.last_thread_id = thread_id
 
@@ -208,6 +238,8 @@ async def build_app(
                     job_manager_url=job_manager_url,
                     http_client=httpx_client,
                     register_jobs=req.register_jobs,
+                    recursion_limit=app.state.recursion_limit,
+                    project_workdir=workdir,
                 ):
                     app.state.event_log.append(thread_id, payload)
                     yield _sse(payload)

@@ -3,11 +3,11 @@ from langchain.tools import tool, ToolRuntime
 from langchain.messages import ToolMessage, HumanMessage, SystemMessage
 from langgraph.types import Command 
 from .models import SkillMetadata, Step, RawPlan, RawStep, Delete
-from typing import List, Dict, Literal, Set
+from typing import List, Dict, Literal, Set, Any
 
 def init_planner_tool(model:BaseChatModel):
     @tool 
-    def planner(runtime:ToolRuntime,
+    def planner(runtime:ToolRuntime[Any],
                 related_skill_names:Set[str], 
                 task_content:str,
                 plan_steps_guidance: List[str],
@@ -105,7 +105,7 @@ def init_planner_tool(model:BaseChatModel):
 
 
     @tool 
-    def get_raw_plan_content(runtime:ToolRuntime, detailed:bool = False):
+    def get_raw_plan_content(runtime:ToolRuntime[Any], detailed:bool = False):
         '''
         Return all the unregistered `RawPlan` objects.
         Args:
@@ -142,7 +142,7 @@ def init_planner_tool(model:BaseChatModel):
         return result 
 
     @tool 
-    def delete_raw_plan(runtime:ToolRuntime, raw_plan_id: str):
+    def delete_raw_plan(runtime:ToolRuntime[Any], raw_plan_id: str):
         '''
         Delete a raw plan.
         Args:
@@ -167,7 +167,7 @@ def init_planner_tool(model:BaseChatModel):
 
 
     @tool 
-    def register_raw_plan(runtime:ToolRuntime,
+    def register_raw_plan(runtime:ToolRuntime[Any],
                           raw_plan_id: str,
                           action:Literal["append", "replace"] = "append",
                           depend_on_external:List[List[str]] = None,

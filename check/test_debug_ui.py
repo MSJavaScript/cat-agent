@@ -94,6 +94,7 @@ def test_interrupt_source() -> None:
 
 async def _test_routes() -> None:
     runtime_client = httpx.AsyncClient()
+    calls: list[dict[str, Any]] = []
 
     class FakeGraph:
         pass
@@ -109,7 +110,14 @@ async def _test_routes() -> None:
         job_manager_url: str,
         http_client: httpx.AsyncClient,
         register_jobs: bool = True,
+        recursion_limit: int | None = None,
+        project_workdir: str | None = None,
     ):
+        calls.append({
+            "agent_input": agent_input,
+            "thread_id": thread_id,
+            "project_workdir": project_workdir,
+        })
         yield {
             "type": "agent",
             "message": "orchestrator says hi",
@@ -145,6 +153,10 @@ async def _test_routes() -> None:
             assert "/events/" in page.text
             assert 'id="jumpChips"' in page.text
             assert "updateJumpbar" in page.text
+            assert 'id="workdirDialog"' in page.text
+            assert "promptWorkdir" in page.text
+            # A server-side 400 for a bad workdir must reopen the prompt.
+            assert "workdir rejected" in page.text
             # The client must be able to notice a restarted (volatile) log.
             assert "serverResetRequired" in page.text
             assert "latest_seq" in page.text
@@ -175,12 +187,15 @@ async def _test_routes() -> None:
                     "message": "hello",
                     "thread_id": "t1",
                     "register_jobs": False,
+                    "workdir": "/tmp",
                 },
             ) as chat:
                 assert chat.status_code == 200
                 assert chat.headers["X-Thread-Id"] == "t1"
                 body = await chat.aread()
             assert b"orchestrator says hi" in body
+            assert calls[-1]["project_workdir"] == "/tmp", calls[-1]
+            assert calls[-1]["agent_input"]["project_workdir"] == "/tmp", calls[-1]
 
             events = (await client.get("/events/t1?after=0")).json()
             assert events["latest_seq"] == 2

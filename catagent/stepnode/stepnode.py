@@ -9,7 +9,7 @@ from langgraph.runtime import Runtime
 from langchain.tools import ToolRuntime
 from langgraph.prebuilt import ToolNode
 
-from .models import StepNodeState, InterruptState, RawStepResult
+from .models import StepNodeState, StepNodeContext, InterruptState, RawStepResult
 from .init_tools import get_tool_node, TOOLS_BY_NAME
 from typing import List, Dict, Any
 import copy, httpx, json, logging, os
@@ -118,6 +118,25 @@ def create_model_and_tool_node(model:BaseChatModel,
             system_prompt += content+'\n'
     
     def model_node(state:StepNodeState):
+        if state["stepnode_finalization"]:
+            prompt = "Work finalization. Determine the final `status` (success or error) and summary this run. NOTE: Generate a structured `RawStepResult` object instead of plain text."
+
+            for _ in range(3):
+                try:
+                    result = model.with_structured_output(RawStepResult).invoke(
+                            [SystemMessage(content=system_prompt), *state["messages"], HumanMessage(content=prompt)])
+
+                    result = RawStepResult.model_validate(result)
+                    break
+                except Exception as e:
+                    pass
+            else:
+                result = RawStepResult(status="error",
+                                       summary="Cannot extract structured output from messages of StepNode, the job may failed, maybe not.",
+                                       output_artifacts=dict())
+
+            return {"step_result": result} 
+
         """Agent node — what middleware's wrap_model_call did, spelled out."""
         accessible = state.get("accessible_tool_names", {})
         existing_names = {t.name for t in static_tools}
@@ -150,30 +169,6 @@ def has_interrupts(state:StepNodeState):
 
     return interrupt_list if len(interrupt_list) > 0 else "model_node"
 
-
-def create_summary_node(model:BaseChatModel):
-    def summary_node(state:StepNodeState):
-        report_md = os.path.join(state.get("workdir", ""), "report.md")
-        if not os.path.isfile(report_md):
-            return {"step_result": RawStepResult(
-                status="error",
-                summary=f"{report_md} was not created; the step result is unknown.")}
-
-        with open(report_md, mode="r") as f:
-            content = ''.join(f.readlines())
-
-        content = content.strip()
-        if len(content) == 0:
-            return {"step_result": RawStepResult(
-                status="error",
-                summary=f"{report_md} is empty; the step result is unknown.")}
-        else:
-            system_prompt = "Given a report on the execution results, you extract the `status` (success or error), summary and error messages, and description of important output artifacts from the results."
-            result = model.with_structured_output(RawStepResult).invoke(
-                [SystemMessage(content=system_prompt), HumanMessage(content=content)])
-            return {"step_result": result}
-
-    return summary_node
 
 def create_interrupt_node(model:BaseChatModel):
     parse_user_reply = create_parse_user_reply_util(model)
@@ -318,8 +313,11 @@ def create_interrupt_node(model:BaseChatModel):
 def route_after_model(state: StepNodeState) :
     last = state["messages"][-1]
     if getattr(last, "tool_calls", None):
-        return "tool_node"
-    return "summary_node"
+        return Command(goto="tool_node")
+    elif not state["stepnode_finalization"]:
+        return Command(goto="model_node", update={"stepnode_finalization": True})
+    else:
+        return Command(goto=END)
 
     
 def create_stepnode_agent(model:BaseChatModel,
@@ -334,19 +332,17 @@ def create_stepnode_agent(model:BaseChatModel,
                                                        http_client)
     
     interrupt_node = create_interrupt_node(model)
-    summary_node = create_summary_node(model)
 
-    graph = StateGraph(StepNodeState)
+    graph = StateGraph(StepNodeState, context_schema=StepNodeContext)
     graph.add_node("model_node", model_node)
     graph.add_node("tool_node", tool_node)
     graph.add_node("interrupt_node", interrupt_node)
-    graph.add_node("summary_node", summary_node)
+    graph.add_node("route_after_model", route_after_model)
 
     graph.add_edge(START, "model_node")
-    graph.add_conditional_edges("model_node", route_after_model)
+    graph.add_edge("model_node", "route_after_model")
     graph.add_conditional_edges("tool_node", has_interrupts)
     graph.add_edge("interrupt_node", "model_node")
-    graph.add_edge("summary_node", END)
 
     agent = graph.compile(checkpointer=checkpointer)
     return agent 

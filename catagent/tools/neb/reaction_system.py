@@ -1,5 +1,5 @@
 from catagent.libs.nebkit.network.system import ReactionSystem
-from typing import Dict, List, Tuple, Literal
+from typing import Dict, List, Tuple, Literal, Any
 from ase.io import read, write 
 import os, pickle, json
 from langchain.tools import tool, ToolRuntime
@@ -13,7 +13,7 @@ class ReactionSystemToolSets:
         this = self
 
         @tool 
-        def dump(runtime:ToolRuntime,
+        def dump(runtime:ToolRuntime[Any],
                  system_name: str, 
                  file_path:str):
             '''
@@ -22,24 +22,27 @@ class ReactionSystemToolSets:
                 system_name: Name of the reaction system.
                 file_path: Absolute path to a pkl file.
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ]
+            
             if (not thread_id in this.reactions_systems) or \
                 (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
             with open(file_path, mode="wb") as f:
-                obj = this.reactions_systems[thread_id]
-                pickle.dump(obj)
+                obj = this.reactions_systems[thread_id][system_name]
+                pickle.dump(obj, f)
             return f"Reaction system {system_name} is dumped to {file_path}."
 
         @tool 
-        def load_from_file(system_name: str, file_path:str, runtime:ToolRuntime):
+        def load_from_file(system_name: str, file_path:str, runtime:ToolRuntime[Any]):
             '''
             Load a reaction system object from the pickle file and assign a name to it.
             Args:
                 system_name: Name of the reaction system.
                 file_path: Absolute path to the pickle file which contains a reaction system object.
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ] 
             with open(file_path, mode="rb") as f:
                 obj = pickle.load(f)
                 if not thread_id in this.reactions_systems:
@@ -48,13 +51,14 @@ class ReactionSystemToolSets:
             return f"ReactionSystem object is loaded from {file_path}, with key {system_name}." 
 
         @tool
-        def has_reaction_system(system_name: str, runtime:ToolRuntime)->bool:
+        def has_reaction_system(system_name: str, runtime:ToolRuntime[Any])->bool:
             '''
             Cheack if a reaction system exist.
             Args:
                 system_name: Name of the reaction system.
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ]
             if not thread_id in this.reactions_systems:
                 return False 
             if not system_name in this.reactions_systems[thread_id]:
@@ -62,13 +66,14 @@ class ReactionSystemToolSets:
             return True
 
         @tool
-        def delete_reaction_system(system_name: str, runtime:ToolRuntime) -> str:
+        def delete_reaction_system(system_name: str, runtime:ToolRuntime[Any]) -> str:
             '''
             Delete a reaction system.
             Args:
                 system_name: Name of the reaction system.
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ] 
             if not thread_id in this.reactions_systems:
                 return "No reaction system exists in the current thread."
             if not system_name in this.reactions_systems[thread_id]:
@@ -79,7 +84,7 @@ class ReactionSystemToolSets:
 
         @tool 
         def create_reaction_system(
-            runtime:ToolRuntime,
+            runtime:ToolRuntime[Any],
             system_name: str,
             reactants_mol_pathes:List[str],
             products_mol_pathes:List[str],
@@ -94,7 +99,8 @@ class ReactionSystemToolSets:
                 json_log_path: Path to the json file which logs the state of `ReactionSystem` object.
                 visualization_dir: The dir path to save visualization pictures of intermediate species and reactions.
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ] 
             if thread_id in this.reactions_systems and system_name in this.reactions_systems[thread_id]:
                 raise RuntimeError(f"Reaction system {system_name} already exists.")
 
@@ -128,14 +134,15 @@ class ReactionSystemToolSets:
             return msg
 
         @tool 
-        def render(runtime:ToolRuntime, system_name: str, backend:Literal["ase", "rdkit"] = "rdkit"):
+        def render(runtime:ToolRuntime[Any], system_name: str, backend:Literal["ase", "rdkit"] = "rdkit"):
             '''
             Render the intermediates and reactions to pictures.
             Args:
                 system_name: Name of the reaction system.
                 backend: The backend used to render the reaction system.
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ] 
             if (not thread_id in this.reactions_systems) or \
                     (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
@@ -153,7 +160,7 @@ class ReactionSystemToolSets:
 
         @tool 
         def generate_elementary_steps(
-            runtime:ToolRuntime, 
+            runtime:ToolRuntime[Any], 
             system_name: str,
             ntimes:int = -1,
             max_natoms_tot:int = -1, 
@@ -172,7 +179,8 @@ class ReactionSystemToolSets:
                 min_natoms: A `dict` used to limit the min number of atoms of each element in the intermediates.
                 forbidden_pattern: A list of forbidden substructures represented by molecular graph, e.g., `('H,O,C,O,H','0-1,1-2,2-3,3-4')` represents geminal diol. If omitted, a list of default patterns are generated.
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ] 
             if (not thread_id in this.reactions_systems) or \
                   (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
@@ -189,16 +197,19 @@ class ReactionSystemToolSets:
 
 
         @tool
-        def delete_species(runtime:ToolRuntime,
+        def delete_species(runtime:ToolRuntime[Any],
                            system_name: str, 
-                           species_indices: List[int] = None):
+                           species_indices: List[int] = []):
             '''
             Delete intermediate speices from the system. Related reactions will also be deleted. This is a human-in-the-loop (HITL) tool.
             Args:
                 system_name: Name of the reaction system.
                 species_indices: Indices of intermediate speices.
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            if not species_indices:
+                return "No species indices indices are set, no intermediate speices are deleted."
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ]
             if (not thread_id in this.reactions_systems) or \
                     (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
@@ -209,16 +220,20 @@ class ReactionSystemToolSets:
             return f"Intermediates {species_indices} are deleted. {msg}"
 
         @tool
-        def delete_reactions(runtime:ToolRuntime,
+        def delete_reactions(runtime:ToolRuntime[Any],
                              system_name: str, 
-                             reaction_indices: List[int] = None):
+                             reaction_indices: List[int] = []):
             '''
             Delete reactions from the system. Related intermediate speices will also be deleted. This is a human-in-the-loop (HITL) tool.
             Args:
                 system_name: Name of the reaction system.
                 reaction_indices: Indices of reactions. 
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            if not reaction_indices:
+                return "No reaction indices are set, no reactions are deleted."
+            
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ] 
             if (not thread_id in this.reactions_systems) or \
                     (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
@@ -230,16 +245,20 @@ class ReactionSystemToolSets:
             return f"Reactions {reaction_indices} are deleted. {msg}"
 
         @tool 
-        def merge_reactions(runtime:ToolRuntime,
+        def merge_reactions(runtime:ToolRuntime[Any],
                             system_name: str, 
-                            reaction_index_pairs: List[Tuple[int, int]] = None):
+                            reaction_index_pairs: List[Tuple[int, int]] = []):
             '''
             Merge reactions in the system. This is a human-in-the-loop (HITL) tool.
             Args:
                 system_name: Name of the reaction system.
                 reaction_index_pairs: A list of tuples, each tuple contains the indices of reactions need to be merged. 
             ''' 
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            if not reaction_index_pairs:
+                return "No valid reaction pairs are set. No reactions are merged."
+            
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ]
             if (not thread_id in this.reactions_systems) or \
                     (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
@@ -252,7 +271,7 @@ class ReactionSystemToolSets:
             return f"Reaction pairs {reaction_index_pairs} are merged. Call `delete_reactions` to delete redundant reactions. {msg}"
 
         @tool 
-        def bind_to_surface(runtime:ToolRuntime,
+        def bind_to_surface(runtime:ToolRuntime[Any],
                             system_name: str,
                             surface_structures_path:List[str],
                             cwd:str = None):
@@ -263,7 +282,8 @@ class ReactionSystemToolSets:
                 surface_structures_path: Pathes to surface structures, should be readable to ase.
                 cwd: Current working directory. 
             '''
-            thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
+            thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ]
             if (not thread_id in this.reactions_systems) or \
                     (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
@@ -295,7 +315,7 @@ class ReactionSystemToolSets:
                         write(f"surface_{i}/reaction_{j}/POSCAR_fin_{k}", fin_list[k])
                 info["reactions_info"] = reactions_info
                 with open(f"surface_{i}/binding_info.json", mode="w") as f:
-                    json.dump(info, indent=4)
+                    json.dump(info, f, indent=4)
             if cwd:
                 os.chdir(old_wd)
 

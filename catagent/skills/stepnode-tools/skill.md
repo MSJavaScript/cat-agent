@@ -15,10 +15,9 @@ This skill explains the usage of tools in StepNode subagent. These tools are org
 
 ## "structure_building_tools" collection.
 This collection contains tools which can build IS and FS, adsorption structure, and initial NEB path. 
-
-- `sampling_ini_fin_states_on_surface`: Given IS and FS molecules, automatically match their atomic indices, then attach them on a surface, all surface sites are considered.
-- `build_initial_nebpath_on_surface`: Given IS and FS, build neb path. This tool will handle some special cases, for example, it will adjust the structure if molecule dissociates in vacuum. 
-- `sampling_single_ads_configs_on_surface`: Attach an adsorbate on the surface, all surface sites are considered.
+- `build_ini_fin_structures_on_surface`: Given IS and FS molecules, automatically match their atomic indices, then attach them on a surface, all surface sites are considered. This tool is very useful, for you don't need to consider the correspondence of atomic indices.
+- `build_nebpath_on_surface`: Given IS and FS, build neb path. This tool will handle some special cases, for example, it will adjust the structure if molecule dissociates in vacuum. 
+- `build_adsorption_configs_on_surface`: Attach a SINGLE adsorbate on the surface, all surface sites are considered.
 
 
 ## "reaction_system_tools" collection 
@@ -37,7 +36,7 @@ The tools below marked by HITL will automatically pause the agent to ask the use
 - `load_from_file`: Load a reaction system object from pkl file.
 - `has_reaction_system`: Check if a reaction sytem exists.
 - `delete_reaction_system`: To save memory, we should delete the object when edit task is done.
-- `bind_to_surface`: Given a surface structure, bind all the initial and final states to the surface. For complex surface, such as Fe(110), there will be many configurations, user should select which will be kept to limit the computation cost.
+- `bind_to_surface`: Given a surface structure, bind all the initial and final states to the surface. For complex surface, such as Fe(110), there will be many configurations, user should select which will be kept to limit the computation cost. The atomic indices in IS and FS are matched, you can safely interpolate use these structures to make NEB pathes.
 
 #### General workflow to generate a reaction network
 Take reaction CH4 + CO2 <-> 2* CO + 2* H2 as an example.

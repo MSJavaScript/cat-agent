@@ -585,9 +585,12 @@ class JobManager:
         # is a result error rather than a transient transfer error.
         if job_status == JobStatus.COMPLETED:
             missing = self._missing_artifacts(record)
-            if missing:
-                return "error", (f"Declared result files are missing after "
-                                 f"download: {', '.join(missing)}.")
+            # We currently prefer not to check _missing_artifacts
+            # Because LLM usually can not set results_pattern correctly,
+            
+            # if missing:
+            #     return "error", (f"Declared result files are missing after "
+            #                      f"download: {', '.join(missing)}.")
 
         # 这里使用agent 检查一下是否有任务提交上的错误。
         response = None
@@ -639,7 +642,6 @@ class JobManager:
         means "download everything"; without a declaration there is nothing
         deterministic to check.
         """
-        return []
         patterns = [p for p in (record.result_patterns or []) if p]
         if not patterns:
             return []

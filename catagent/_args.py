@@ -48,6 +48,16 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         f"shipped inside the catagent package (override with {SKILLS_ENV}).",
     )
     parser.add_argument(
+        "--recursion-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum number of LangGraph supersteps per graph invocation. "
+        "It is copied to the outer workflow, the orchestrator and every "
+        "StepNode. Default: LangGraph's own default "
+        "(LANGGRAPH_DEFAULT_RECURSION_LIMIT, 10007 in the pinned version).",
+    )
+    parser.add_argument(
         "--log",
         default=None,
         help="Path to the catagent log file (default: log to stderr).",

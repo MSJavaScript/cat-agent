@@ -48,9 +48,11 @@ async def main() -> None:
         return object(), http_client, FakeDB()
 
     async def fake_stream_chat(*, catagent, agent_input, thread_id,
-                               job_manager_url, http_client, register_jobs=True):
+                               job_manager_url, http_client, register_jobs=True,
+                               recursion_limit=None, project_workdir=None):
         stream_calls.append(
-            {"input": agent_input, "register_jobs": register_jobs}
+            {"input": agent_input, "register_jobs": register_jobs,
+             "project_workdir": project_workdir}
         )
         if len(stream_calls) == 1:
             yield {
@@ -103,6 +105,8 @@ async def main() -> None:
     assert all(call["register_jobs"] is False for call in stream_calls), (
         "the CLI must not register a jobmanager callback"
     )
+    assert stream_calls[0]["input"]["project_workdir"], stream_calls[0]
+    assert stream_calls[0]["project_workdir"] == stream_calls[0]["input"]["project_workdir"]
     assert isinstance(stream_calls[1]["input"], Command)
     assert stream_calls[1]["input"].resume == {
         "int-1": {

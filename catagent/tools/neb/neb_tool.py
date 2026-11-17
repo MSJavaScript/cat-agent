@@ -8,7 +8,7 @@ from langchain_core.tools import tool
 
 
 @tool
-def sampling_ini_fin_states_on_surface(ini_fragments:List[str],
+def build_ini_fin_structures_on_surface(ini_fragments:List[str],
                                        fin_fragments:List[str],
                                        surface:str,
                                        save_path:str) -> dict:
@@ -55,7 +55,7 @@ def sampling_ini_fin_states_on_surface(ini_fragments:List[str],
                       outfile_list=[path_to_ini, path_to_fin, path_to_indices]).model_dump(mode='python')
 
 @tool 
-def build_initial_nebpath_on_surface(save_path: str,
+def build_nebpath_on_surface(save_path: str,
                                       ini_state_path: str,
                                       fin_state_path: str,
                                       adsorbate_indices_path: str,
@@ -91,9 +91,9 @@ def build_initial_nebpath_on_surface(save_path: str,
 
 
 @tool
-def sampling_single_ads_configs_on_surface(source_surface_structure:str,
-                                            source_adsorbate_structure:str,
-                                            save_path:str) -> dict:
+def build_adsorption_configs_on_surface(source_surface_structure:str,
+                                        source_adsorbate_structure:str,
+                                        save_path:str) -> dict:
     '''
     Bind an single adsorbate to the surface, sampling all possible binding sites according to the chemical environment. Generate an `single_ads_configs.extxyz` file which contains all the configurations and an `adsorbate_atomic_indices.dat` containing the atomic indices of adsorbate. (Do not use this function to build NEB initial or final structures, because it does not guarantee the correspondence of atom indices.)
 

@@ -1,4 +1,5 @@
 source /mnt/t/softwares_install/lang-graph/bin/activate
+export PYTHONPATH="/mnt/t/programming/myagents/cat-agent-dev:$PYTHONPATH"
 python3 -m catagent.jobmanager.server \
      --setting /mnt/t/workdir/agent_test/db/jobmanager_config.json \
      --host localhost \

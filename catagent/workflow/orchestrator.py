@@ -10,7 +10,7 @@ from .models import dict_reducer, Step, SkillMetadata, RawPlan
 from catagent.stepnode.models import InterruptState
 
 import httpx
-from typing import List, Annotated, Dict, Literal, Callable, Any 
+from typing import List, Annotated, Dict, Literal, Callable, Any, TypedDict 
 from catagent.tools.other.util_tools import execute_shell, edit_file, read_file
 from .skill_tool import init_load_skill_from_fs, get_skill_content, get_skill_summaries
 from .planner_tool import init_planner_tool
@@ -19,14 +19,14 @@ from .step_edit_tool import (get_steps_layout,
                             get_step_content,
                             set_step_status,
                             set_step_workdir,
-                            set_step_preparation_stage,
+                            set_step_preparation_done,
                             set_step_dependence,
                             set_step_content,
                             create_step)
 
 
 @tool 
-def pause_to_ask(runtime:ToolRuntime, 
+def pause_to_ask(runtime:ToolRuntime[Any], 
                  message:str, 
                  type: Literal["any", "confirmation", "choice-single", "choice-multiple"] = "any",
                  meta_data:Dict[str, Any] = None ):
@@ -55,7 +55,7 @@ def pause_to_ask(runtime:ToolRuntime,
 
 
 @tool 
-def set_finalization_flag(runtime:ToolRuntime, finalization:bool):
+def set_finalization_flag(runtime:ToolRuntime[Any], finalization:bool):
     '''
     Set `finalization` flag of the agent. ONLY for replanning phase, before call this tool, please call `get_current_phase` to confirm the agent working phase. 
     Args:
@@ -69,7 +69,7 @@ def set_finalization_flag(runtime:ToolRuntime, finalization:bool):
         }) 
 
 @tool 
-def get_current_phase(runtime:ToolRuntime):
+def get_current_phase(runtime:ToolRuntime[Any]):
     '''
     Get the current working phase.
     '''
@@ -86,27 +86,6 @@ def get_current_phase(runtime:ToolRuntime):
         return "We are not in a specific phase. Just waiting for user's request or logging the working state if `state.md` is not updated."
     else:
         raise ValueError(f"Unknow phase {phase}.")
-
-@wrap_model_call 
-async def filter_tools(
-    request: ModelRequest, 
-    handler: Callable[[ModelRequest], ModelResponse]) -> ModelResponse:
-    request_type = request.state.get("phase", "user")
-    common_tools = {"execute_shell", "edit_file", "pause_to_ask", "read_file", 
-                    "get_steps_layout", "get_step_content", "get_current_phase"}
-    allowed_tools = dict()
-    if request_type == "preparation":
-        allowed_tools = common_tools | {
-            "set_step_workdir", "set_step_preparation_stage",
-            "get_skill_summaries", "get_skill_content",
-            "load_skill_from_filesystem", "get_providers_info",
-        }
-    elif request_type == "logging":
-        allowed_tools = common_tools
-    if allowed_tools:
-        tools = [t for t in request.tools if t.name in allowed_tools]
-        request = request.override(tools=tools)
-    return await handler(request)
 
  
 @wrap_tool_call
@@ -127,12 +106,19 @@ async def handle_tool_error(request, handler):
 
 
 class OrchestratorAgentState(AgentState):
+    role: Literal["Orchestrator"] = "Orchestrator"
+
     finalization: bool = False 
     loaded_skills: Annotated[Dict[str, SkillMetadata], dict_reducer]
     steps: Annotated[Dict[str, Step], dict_reducer]
     raw_plan_dict: Annotated[Dict[str, RawPlan], dict_reducer] 
     phase: Literal["user", "preparation", "correction", "replanning", "logging"] = "user"
     interrupt_resume: Dict[str, Any]
+
+class OrchestratorContext(TypedDict):
+    project_workdir: str  # 整个项目的工作路径
+    # 键是目录绝对路径，值是目录说明，例如其中包含什么文件
+    resource_dirs: Dict[str, str] 
 
 def create_orchestrator_agent(model:BaseChatModel, 
                               system_skill_path:List[str], 
@@ -148,7 +134,7 @@ def create_orchestrator_agent(model:BaseChatModel,
     tools = [execute_shell, edit_file, read_file, pause_to_ask, get_current_phase,
              set_finalization_flag,
              get_steps_layout, set_step_status, set_step_workdir,
-             set_step_preparation_stage, set_step_dependence,
+             set_step_preparation_done, set_step_dependence,
              set_step_content, get_step_content, create_step] 
 
     tools.append(init_job_manager_tools(job_manager_url, http_client))
@@ -161,6 +147,7 @@ def create_orchestrator_agent(model:BaseChatModel,
                                       tools = tools,
                                       system_prompt=system_prompt,
                                       state_schema=OrchestratorAgentState,
+                                      context_schema=OrchestratorContext,
                                       checkpointer=checkpointer,
                                       middleware=[handle_tool_error]) 
     # debug 阶段先不考虑任何中间件

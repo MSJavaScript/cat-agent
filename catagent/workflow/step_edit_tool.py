@@ -2,12 +2,12 @@ from langchain.tools import tool, ToolRuntime
 from langgraph.types import Command
 from langchain.messages import ToolMessage
 from .models import Step
-from typing import List, Dict, Set, Literal
+from typing import List, Dict, Set, Literal, Any
 import os 
 
 
 @tool 
-def get_steps_layout(runtime:ToolRuntime):
+def get_steps_layout(runtime:ToolRuntime[Any]):
     '''
     Get the layout of all the steps in the state, useful for getting a glance at the progress of the plans and the dependence of plan steps.
     Returns:
@@ -28,14 +28,14 @@ def get_steps_layout(runtime:ToolRuntime):
 
 
 @tool
-def set_step_status(runtime:ToolRuntime, 
+def set_step_status(runtime:ToolRuntime[Any], 
                     step_id:str,
-                    status:Literal["pending", "done", "failed", "cancelled", "running"]):
+                    status:Literal["pending", "done", "running", "deleted"]):
     '''
     Set the status of a step.
     Args:
         step_id: Unique id of the step.
-        status: Step status. Set a step to "cancelled" to delete a step.
+        status: Step status. Set a step to "deleted" to delete a step.
     '''
     steps = runtime.state["steps"]
     if not step_id in steps:
@@ -50,7 +50,7 @@ def set_step_status(runtime:ToolRuntime,
     })
 
 @tool 
-def set_step_workdir(runtime:ToolRuntime, step_id:str, workdir:str):
+def set_step_workdir(runtime:ToolRuntime[Any], step_id:str, workdir:str):
     '''
     Set the workdir of a step.
     Args:
@@ -73,29 +73,29 @@ def set_step_workdir(runtime:ToolRuntime, step_id:str, workdir:str):
 
 
 @tool 
-def set_step_preparation_stage(runtime:ToolRuntime, 
-                               step_id:str, 
-                               preparation_stage:Literal["done", "ongoing", "notyet"] = "notyet"): 
+def set_step_preparation_done(runtime:ToolRuntime[Any], step_id:str, flag:bool):
     '''
-    Set the `preparation_stage` of a step. ONLY for preparation phase, before call this tool, please call `get_current_phase` to confirm the agent working phase. For `preparation_stage = 'notyet'` or `'ongoing'`, `status` must be `'pending'`. 
+    Set the `preparation_done` flag of a step. ONLY for preparation phase, before call this tool, please call `get_current_phase` to confirm the agent working phase. The following conditions should be always true: `(not preparation_done) and status == 'pending'`, `preparation_done and status != 'pending'`.
     Args:
         step_id: Unique id of the step.
-        preparation_stage: Can only be "done", "ongoing" or "notyet".
+        flag: If the preparation is done.
     '''
     steps = runtime.state["steps"]
     if not step_id in steps:
         raise KeyError(f"{step_id} does not exist.")
 
-    update = {step_id: {"preparation_stage": preparation_stage}}
+    update = {step_id: {"preparation_done": flag}}
     return Command(update={
-        "steps": update,
-        "messages": [ToolMessage(content=f"`preparation_stage` of {step_id} is set to {preparation_stage}.", 
-                                 tool_call_id=runtime.tool_call_id,
-                                 name="set_step_preparation_stage")]
-    })
+            "steps": update,
+            "messages": [ToolMessage(content=f"`preparation_done` flag of {step_id} is set to {flag}.", 
+                            tool_call_id=runtime.tool_call_id,
+                            name="set_step_preparation_done")]
+        })
+
+
 
 @tool 
-def set_step_dependence(runtime:ToolRuntime, 
+def set_step_dependence(runtime:ToolRuntime[Any], 
                         step_id:str, 
                         depend_on:Set[str]=None, 
                         required_by:Set[str]=None):
@@ -132,7 +132,7 @@ def set_step_dependence(runtime:ToolRuntime,
 
 
 @tool 
-def set_step_content(runtime:ToolRuntime, 
+def set_step_content(runtime:ToolRuntime[Any], 
                     step_id:str,
                     need_further_planning:bool = None,
                     content:str = None,
@@ -183,12 +183,12 @@ def set_step_content(runtime:ToolRuntime,
 
 
 @tool 
-def create_step(runtime:ToolRuntime, 
+def create_step(runtime:ToolRuntime[Any], 
                 step_name:str, 
                 content: str,
                 plan_index:int, 
-                solution: str = "",
-                step_index:int = 0):
+                solution: str,
+                step_index:int):
     '''
     Directly add a registered step in agent state with step id "plan-{plan_index}:step-{step_index}:{step_name}".
     Args:
@@ -223,7 +223,7 @@ def create_step(runtime:ToolRuntime,
 
 
 @tool 
-def get_step_content(runtime:ToolRuntime, 
+def get_step_content(runtime:ToolRuntime[Any], 
                      step_id_list:List[str], 
                      return_content: bool = False,
                      return_solution: bool = False,
@@ -242,7 +242,8 @@ def get_step_content(runtime:ToolRuntime,
         - step_id(str): Unique id of the step.
         - status(str): Step status.
         - workdir(str): Workdir of the step.
-        - preparation_stage(bool): Step preparation stage.
+        - n_times(int): How many times this step in run or retried.
+        - preparation_done(bool): If step preparation is done.
         - need_further_planning(bool): If the step need further planning.
         - content(str): Step content.
         - related_skills(set): Names of skills related to this step.

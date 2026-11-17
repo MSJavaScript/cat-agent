@@ -2,12 +2,12 @@ from langchain.chat_models import BaseChatModel
 from langchain.tools import tool, ToolRuntime
 from langgraph.types import Command
 from langchain.messages import ToolMessage, HumanMessage
-from typing import Dict
+from typing import Dict, Any
 import os
 from .models import SkillSummaryOutput, SkillArtifact, SkillMetadata
 
 @tool 
-def get_skill_summaries(runtime:ToolRuntime):
+def get_skill_summaries(runtime:ToolRuntime[Any]):
     '''
     Return a dict containing the all the summaries of available skills.
     Returns:
@@ -29,7 +29,7 @@ def get_skill_summaries(runtime:ToolRuntime):
 
 
 @tool 
-def get_skill_content(skill_name:str, runtime:ToolRuntime) -> dict:
+def get_skill_content(skill_name:str, runtime:ToolRuntime[Any]) -> dict:
     """
     Get the detailed content of skill by `skill_name`.
     Args:
@@ -68,7 +68,7 @@ def get_skill_content(skill_name:str, runtime:ToolRuntime) -> dict:
 # Skill管理的相关工具，加载skill，读取文件系统的某个skill
 def init_load_skill_from_fs(model:BaseChatModel):
     @tool 
-    def load_skill_from_filesystem(path:str, runtime:ToolRuntime) -> Command:   
+    def load_skill_from_filesystem(path:str, runtime:ToolRuntime[Any]) -> Command:   
         '''
         Load a skill from the file system.
         Args:

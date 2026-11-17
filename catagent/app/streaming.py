@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -59,6 +60,8 @@ async def _stream_chat(
     job_manager_url: str,
     http_client: httpx.AsyncClient,
     register_jobs: bool = True,
+    recursion_limit: int | None = None,
+    project_workdir: str | None = None,
 ):
     """Run the outer graph and yield UI/debug-friendly payloads.
 
@@ -66,12 +69,52 @@ async def _stream_chat(
     with the job manager, which would make it POST a resume back to the HTTP
     service.  The debug CLI polls the job manager itself, so it passes
     ``register_jobs=False`` to avoid a double resume.
+
+    ``recursion_limit`` bounds LangGraph supersteps per graph invocation.  The
+    value is carried in the config, and ``agent.py`` copies it to the inner
+    orchestrator and StepNode graphs so one CLI/server option applies to all
+    of them.  ``None`` keeps LangGraph's default.
+
+    ``project_workdir`` is the root the StepNodes may access.  It normally
+    comes from the request/agent input, but a resume that only carries an
+    interrupt id has to read the value persisted with the thread.
     """
-    config = {"configurable": {"thread_id": thread_id}}
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    if recursion_limit is not None:
+        config["recursion_limit"] = recursion_limit
+
+    resource_dirs: dict[str, str] = {}
+    if isinstance(agent_input, dict):
+        project_workdir = project_workdir or agent_input.get("project_workdir")
+        resource_dirs = agent_input.get("resource_dirs") or {}
+
+    if not project_workdir:
+        get_state = getattr(catagent, "aget_state", None)
+        if get_state is not None:
+            try:
+                snapshot = await get_state(config)
+                values = getattr(snapshot, "values", None) or {}
+                project_workdir = values.get("project_workdir")
+                resource_dirs = values.get("resource_dirs") or resource_dirs
+            except Exception:
+                # A fresh thread has no checkpoint yet, and lightweight test
+                # doubles may not implement state access at all.
+                pass
+
+    # A client that predates the workdir field may resume an old thread.  The
+    # server cwd is the same fallback used for a regular headless request.
+    if not project_workdir:
+        project_workdir = os.path.abspath(os.getcwd())
+
+    context = {
+        "project_workdir": project_workdir,
+        "resource_dirs": resource_dirs,
+    }
+
     async for chunk in catagent.astream(
         input=agent_input,
         config=config,
-        context={},
+        context=context,
         stream_mode=["custom", "updates"],
         version="v2",
     ):

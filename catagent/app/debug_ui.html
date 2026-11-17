@@ -31,7 +31,7 @@
     margin: 0;
     background: var(--bg);
     color: var(--text);
-    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -62,7 +62,7 @@
   .jumpbar .jump-label {
     flex: 0 0 auto;
     color: var(--muted);
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .09em;
@@ -85,7 +85,7 @@
     background: #ffffff;
     color: var(--text);
     font: inherit;
-    font-size: 11.5px;
+    font-size: 13px;
     cursor: pointer;
     white-space: nowrap;
   }
@@ -114,7 +114,7 @@
   .jump-chip .chip-count {
     flex: 0 0 auto;
     color: var(--muted);
-    font-size: 10px;
+    font-size: 12px;
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0 5px;
@@ -151,7 +151,7 @@
   }
   .threadbar label {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     text-transform: uppercase;
     letter-spacing: .08em;
   }
@@ -165,7 +165,7 @@
     border-radius: 6px;
     padding: 7px 9px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
+    font-size: 14px;
   }
 
   button {
@@ -175,7 +175,7 @@
     border-radius: 6px;
     padding: 7px 11px;
     font: inherit;
-    font-size: 12px;
+    font-size: 14px;
     cursor: pointer;
     white-space: nowrap;
   }
@@ -184,7 +184,7 @@
 
   .status {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -250,14 +250,14 @@
   }
   .card-head h2 {
     margin: 0;
-    font-size: 13px;
+    font-size: 15px;
     font-weight: 650;
     letter-spacing: .01em;
   }
   .card-head .sub {
     color: var(--muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-size: 12.5px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -266,7 +266,7 @@
   }
   .card-head .count {
     color: var(--muted);
-    font-size: 11px;
+    font-size: 12px;
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 1px 7px;
@@ -274,7 +274,7 @@
   }
   .card-head .clear {
     padding: 3px 7px;
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .dot {
@@ -325,7 +325,7 @@
     margin-bottom: 3px;
   }
   .badge {
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .06em;
@@ -340,7 +340,7 @@
 
   .msg-head .name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-size: 12.5px;
     color: var(--text);
     background: #f1f5f9;
     border: 1px solid var(--border);
@@ -350,7 +350,7 @@
   .msg-head .meta {
     margin-left: auto;
     color: var(--muted);
-    font-size: 10px;
+    font-size: 12px;
     white-space: nowrap;
   }
 
@@ -358,7 +358,7 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     word-break: break-word;
-    font-size: 13px;
+    font-size: 15px;
   }
   .msg-body .text:empty::before { content: "(empty)"; color: var(--muted); }
 
@@ -371,8 +371,8 @@
     overflow: auto;
     max-height: 260px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11.5px;
-    line-height: 1.4;
+    font-size: 13px;
+    line-height: 1.45;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
@@ -383,7 +383,7 @@
   details summary {
     cursor: pointer;
     color: var(--muted);
-    font-size: 11px;
+    font-size: 13px;
     user-select: none;
   }
   details summary:hover { color: var(--text); }
@@ -405,11 +405,11 @@
     border-radius: 6px;
     padding: 7px 8px;
     font: inherit;
-    font-size: 12px;
+    font-size: 14px;
   }
   .note {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 14px;
     font-style: italic;
   }
 
@@ -435,7 +435,7 @@
     border-radius: 8px;
     padding: 9px 10px;
     font: inherit;
-    font-size: 13px;
+    font-size: 15px;
   }
   #input:focus, #threadId:focus, .interrupt-controls textarea:focus {
     outline: none;
@@ -452,9 +452,60 @@
   .composer .send:hover { background: #1d4ed8; }
   .hint {
     color: var(--muted);
-    font-size: 11px;
+    font-size: 12.5px;
     margin-top: 6px;
   }
+
+  .workdir-dialog {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 0;
+    width: min(560px, calc(100vw - 32px));
+    color: var(--text);
+    background: var(--panel);
+    box-shadow: 0 24px 70px rgba(15, 23, 42, .28);
+  }
+  .workdir-dialog::backdrop { background: rgba(15, 23, 42, .38); }
+  .workdir-dialog .dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 22px;
+  }
+  .workdir-dialog h2 {
+    margin: 0;
+    font-size: 20px;
+  }
+  .workdir-dialog p { margin: 0; }
+  .workdir-dialog input {
+    width: 100%;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 10px 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 14px;
+  }
+  .workdir-dialog input:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, .15);
+  }
+  .dialog-error { color: var(--danger); font-size: 13px; }
+  .dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .dialog-actions .primary {
+    background: #2563eb;
+    border-color: #1d4ed8;
+    color: #ffffff;
+    font-weight: 650;
+  }
+  .dialog-actions .primary:hover { background: #1d4ed8; }
 
   @media (max-width: 900px) {
     header { flex-wrap: wrap; }
@@ -514,6 +565,20 @@
     <div class="hint">Ctrl+Enter / Cmd+Enter sends. Job submissions resume automatically when jobmanager posts its callback; answer other interrupts in their card.</div>
   </footer>
 
+  <dialog id="workdirDialog" class="workdir-dialog" aria-labelledby="workdirTitle">
+    <div class="dialog-body">
+      <h2 id="workdirTitle">New thread</h2>
+      <p class="note">Choose the project workdir. StepNodes may only access files under this directory (plus the scripts provided by skills).</p>
+      <input id="workdirInput" autocomplete="off" spellcheck="false" placeholder="/path/to/project">
+      <div id="workdirError" class="dialog-error" hidden>Please enter a directory path.</div>
+      <div class="dialog-actions">
+        <button id="workdirCancel" type="button">Cancel</button>
+        <button id="workdirDefault" type="button">Use server default</button>
+        <button id="workdirOk" type="button" class="primary">Use workdir</button>
+      </div>
+    </div>
+  </dialog>
+
 <script>
 (() => {
   "use strict";
@@ -521,6 +586,7 @@
   const JOBMANAGER_SOURCE = "__jobmanager__";
   const POLL_MS = 900;
   const STORE_KEY = "catagent.debug.thread";
+  const WORKDIR_KEY = "catagent.debug.workdir";
 
   const agentsEl = document.getElementById("agents");
   const agentsPane = document.getElementById("agentsPane");
@@ -532,9 +598,17 @@
   const statusEl = document.getElementById("status");
   const sendBtn = document.getElementById("send");
   const jumpChipsEl = document.getElementById("jumpChips");
+  const workdirDialog = document.getElementById("workdirDialog");
+  const workdirInput = document.getElementById("workdirInput");
+  const workdirError = document.getElementById("workdirError");
+  const workdirOkBtn = document.getElementById("workdirOk");
+  const workdirDefaultBtn = document.getElementById("workdirDefault");
+  const workdirCancelBtn = document.getElementById("workdirCancel");
 
   const state = {
     threadId: "",
+    workdir: "",
+    workdirChosen: false,
     lastSeq: 0,
     jmSeq: 0,
     generation: null,
@@ -547,11 +621,53 @@
     jmCount: 0,
   };
 
+  let workdirResolver = null;
+
   // ---------------------------------------------------------------- utilities
 
   function setStatus(text, kind = "") {
     statusEl.textContent = text;
     statusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function saveWorkdir(value) {
+    state.workdir = value || "";
+    try {
+      if (state.workdir) localStorage.setItem(WORKDIR_KEY, state.workdir);
+      else localStorage.removeItem(WORKDIR_KEY);
+    } catch (_) {}
+  }
+
+  function workdirStatus() {
+    if (state.workdir) return state.workdir;
+    return "server default workdir";
+  }
+
+  function promptWorkdir(defaultValue, errorText = "") {
+    workdirError.textContent = errorText || "Please enter a directory path.";
+    workdirError.hidden = !errorText;
+    if (workdirDialog.open) {
+      // A second "New"/load click while the prompt is already visible must
+      // not call showModal() again (that throws InvalidStateError).
+      workdirInput.value = defaultValue || "";
+      workdirInput.focus();
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      workdirResolver = resolve;
+      workdirInput.value = defaultValue || "";
+      workdirDialog.showModal();
+      workdirInput.focus();
+      workdirInput.select();
+    });
+  }
+
+  function finishWorkdir(value) {
+    if (!workdirResolver) return;
+    const resolve = workdirResolver;
+    workdirResolver = null;
+    if (workdirDialog.open) workdirDialog.close();
+    resolve(value);
   }
 
   function pretty(value) {
@@ -1144,7 +1260,11 @@
     setThread(tid);
   }
 
-  function newThread() {
+  async function newThread() {
+    const workdir = await promptWorkdir(state.workdir);
+    if (workdir === null) return;  // cancelled: keep the current thread
+    state.workdirChosen = true;
+    saveWorkdir(workdir);
     state.threadId = "";
     threadInput.value = "";
     try { localStorage.removeItem(STORE_KEY); } catch (_) {}
@@ -1152,7 +1272,7 @@
     url.searchParams.delete("thread");
     history.replaceState(null, "", url.toString());
     resetView();
-    setStatus("live · new thread", "ok");
+    setStatus("live · new thread · " + workdirStatus(), "ok");
   }
 
   function clearView() {
@@ -1175,7 +1295,11 @@
       });
       if (!response.ok) {
         const detail = await response.text().catch(() => "");
-        throw new Error("HTTP " + response.status + (detail ? ": " + detail : ""));
+        const error = new Error(
+          "HTTP " + response.status + (detail ? ": " + detail : "")
+        );
+        error.status = response.status;
+        throw error;
       }
 
       const tid = response.headers.get("X-Thread-Id");
@@ -1209,13 +1333,28 @@
       inputEl.focus();
       return;
     }
-    inputEl.value = "";
+    // If the user dismissed the initial new-thread prompt, ask again before
+    // the first request so a thread never starts without answering it.
+    if (!state.threadId && !state.workdirChosen) {
+      await newThread();
+      if (!state.workdirChosen) return;
+    }
     const body = { message: text, register_jobs: true };
     if (state.threadId) body.thread_id = state.threadId;
+    else if (state.workdir) body.workdir = state.workdir;
     try {
       await postChat(body, { userText: text });
+      inputEl.value = "";
     } catch (err) {
       inputEl.value = text;
+      if (err.status === 400 && !state.threadId && state.workdir) {
+        // The server rejected the project root (not a directory, no access).
+        // Ask for another one instead of only showing a status line.
+        state.workdirChosen = false;
+        await promptWorkdir(state.workdir, err.message);
+        setStatus("workdir rejected; choose another directory", "err");
+        return;
+      }
       setStatus("send error: " + err.message, "err");
     }
   }
@@ -1243,6 +1382,32 @@
   document.getElementById("useThread").addEventListener("click", useThread);
   document.getElementById("newThread").addEventListener("click", newThread);
   document.getElementById("clearView").addEventListener("click", clearView);
+
+  workdirOkBtn.addEventListener("click", () => {
+    const value = workdirInput.value.trim();
+    if (!value) {
+      workdirError.textContent = "Please enter a directory path.";
+      workdirError.hidden = false;
+      workdirInput.focus();
+      return;
+    }
+    workdirError.hidden = true;
+    finishWorkdir(value);
+  });
+  workdirDefaultBtn.addEventListener("click", () => finishWorkdir(""));
+  workdirCancelBtn.addEventListener("click", () => finishWorkdir(null));
+  workdirInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      workdirOkBtn.click();
+    }
+  });
+  workdirDialog.addEventListener("cancel", (event) => {
+    // Keep the dialog controlled by our buttons so a stray Escape cannot
+    // leave a new thread without an answered workdir prompt.
+    event.preventDefault();
+    finishWorkdir(null);
+  });
   document.getElementById("clearJobmanager").addEventListener("click", () => {
     jobmanagerEl.replaceChildren();
     state.jmCount = 0;
@@ -1261,6 +1426,8 @@
   if (!initial) {
     try { initial = localStorage.getItem(STORE_KEY) || ""; } catch (_) {}
   }
+  try { state.workdir = localStorage.getItem(WORKDIR_KEY) || ""; } catch (_) {}
+  state.workdirChosen = Boolean(state.workdir);
   if (initial) {
     state.threadId = initial;
     threadInput.value = initial;
@@ -1269,6 +1436,11 @@
   updateEmpty();
   updateJumpbar();
   schedulePoll(0);
+  if (!initial) {
+    // A new thread needs a project workdir before the first message.  This is
+    // intentionally opened on load as well as from the "New" button.
+    newThread();
+  }
 })();
 </script>
 </body>

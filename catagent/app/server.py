@@ -34,6 +34,9 @@ async def run_server(args) -> None:
     skill_index_json = getattr(args, "skill_index_json", None)
     if skill_index_json:
         app_kwargs["skill_index_json"] = skill_index_json
+    recursion_limit = getattr(args, "recursion_limit", None)
+    if recursion_limit is not None:
+        app_kwargs["recursion_limit"] = recursion_limit
     app = await _build_app(**app_kwargs)
     import uvicorn
 

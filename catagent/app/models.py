@@ -57,6 +57,10 @@ class ChatRequest(BaseModel):
     # Optional session id.  A normal chat without it starts a new thread.
     thread_id: Optional[str] = None
 
+    # Project root for a new thread (the debug UI asks for it).  When omitted,
+    # the HTTP service uses the process cwd, matching the debug CLI.
+    workdir: Optional[str] = None
+
     # Fields posted by jobmanager.manager._post_callback (JobResult).
     job_uuid: Optional[str] = None
     interrupt_id: Optional[str] = None

@@ -32,9 +32,17 @@ def dict_reducer(current:dict, update:dict) -> dict:
     return result
 
 
+class StepNodeContext(TypedDict):
+    project_workdir: str  # 整个项目的工作目录
+    step_workdir: str     # 当前步骤的workdir 
+    resource_dirs: Dict[str, str]  # 键是目录绝对路径，值是目录说明，例如其中包含什么文件
+
 class StepNodeState(TypedDict):
-    # loaded_skills 专供主agent 使用，键是skill名称，值是skill的元数据
+    role: Literal["StepNode"] = "StepNode"
+
     loaded_skills: Annotated[Dict[str, SkillMetadata], dict_reducer]
+
+    skill_artifacts_pathes: Annotated[Set[str], operator.or_]
 
     messages: Annotated[List[AnyMessage], add_messages]
 
@@ -48,7 +56,7 @@ class StepNodeState(TypedDict):
 
     step_result: RawStepResult
 
-    workdir: str
+    stepnode_finalization:bool = False
 
 # Interrupt Node 的私有state
 class InterruptState(TypedDict):

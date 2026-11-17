@@ -50,7 +50,7 @@ PLAN_1 = RawPlan(
         raw_step("relax_a_v2", "Relax sample A with the revised settings."),
         raw_step("relax_b_v2", "Relax sample B with the revised settings."),
     ],
-    topology=None,
+    topology=[(0, 1)],
 )
 
 # rawplan-2: replace both revised relax steps by one combined step (many-to-one).
@@ -58,7 +58,7 @@ PLAN_2 = RawPlan(
     steps=[
         raw_step("relax_both", "Relax samples A and B together."),
     ],
-    topology=None,
+    topology=[(0, 0)],
 )
 
 

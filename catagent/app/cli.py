@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pprint
 import uuid
 from typing import Any, Dict
@@ -92,9 +93,13 @@ async def run_cli(args) -> None:
     catagent, httpx_client, db_conn = await build_runtime(**runtime_kwargs)
 
     thread_id = args.thread_id or f"cli-{uuid.uuid4()}"
+    # The CLI has no workdir prompt: its own cwd is the project root.  This is
+    # the same value the HTTP service uses when a request omits `workdir`.
+    project_workdir = os.path.abspath(os.getcwd())
     pending: Dict[str, Any] = {}
 
     print(f"cat-agent debug CLI, thread_id={thread_id}")
+    print(f"The current project dir is {project_workdir}")
     print("Type 'exit' or 'quit' to leave. Interrupt answers may be JSON.")
 
     try:
@@ -174,6 +179,7 @@ async def run_cli(args) -> None:
                     "messages": [HumanMessage(content=raw)],
                     "finalization": False,
                     "orchestrator_is_working": False,
+                    "project_workdir": project_workdir,
                 }
 
             try:
@@ -187,6 +193,8 @@ async def run_cli(args) -> None:
                     # also POST a callback to a nonexistent HTTP endpoint for
                     # this process.
                     register_jobs=False,
+                    recursion_limit=getattr(args, "recursion_limit", None),
+                    project_workdir=project_workdir,
                 ):
                     _print_payload(payload)
                     if payload.get("type") == "interrupt":

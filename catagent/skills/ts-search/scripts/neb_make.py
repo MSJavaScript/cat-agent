@@ -1,5 +1,5 @@
 """
-Interpolate between initial state and final state, generate the initial NEB path.
+Interpolate between initial state and final state, generate the initial NEB path. NOTE: The atomic indices in IS and FS must be matched.
 
 Usage:
 python3 neb_make.py --ini POSCAR_ini --fin POSCAR_fin --spacing 0.5 
@@ -27,7 +27,7 @@ def get_structures_distance(atoms1, atoms2)->float:
     diff_cart = np.matmul(diff_frac, cell1)
     return np.sum(diff_cart**2.0) ** 0.5 
 
-parser = argparse.ArgumentParser(description='Make an initial guess of NEB path from initial and final state.')
+parser = argparse.ArgumentParser(description='Make an initial guess of NEB path from initial and final state. NOTE: The atomic indices in IS and FS must be matched.')
 parser.add_argument("--ini", type=str, required=True, help="Path to initial state POSCAR or CONTCAR.")
 parser.add_argument("--fin", type=str, required=True, help="Path to final state POSCAR or CONTCAR.")
 parser.add_argument("--spacing", type=float, default=0.5, help="The spacing between images in the NEB path, this will be ignored if `--nimages` is set. Default 0.5.")

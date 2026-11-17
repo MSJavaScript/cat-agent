@@ -7,14 +7,14 @@ from langchain_core.tools.base import BaseTool
 from langchain.agents.middleware import ToolCallRequest
 from langgraph.errors import GraphBubbleUp
 
-from catagent.tools.neb.neb_tool import (sampling_ini_fin_states_on_surface,
-                                build_initial_nebpath_on_surface, 
-                                sampling_single_ads_configs_on_surface)
+from catagent.tools.neb.neb_tool import (build_ini_fin_structures_on_surface,
+                                        build_nebpath_on_surface,
+                                        build_adsorption_configs_on_surface)
 from catagent.workflow.skill_tool import get_skill_content, get_skill_summaries
 
 from catagent.tools.neb.reaction_system import ReactionSystemToolSets
 from catagent.tools.other.util_tools import execute_shell, edit_file, read_file
-from .models import ToolNamespace, AgentInterrupt, JobSubmission, AskForArgs
+from .models import ToolNamespace, AgentInterrupt, JobSubmission, AskForArgs, StepNodeContext
 from typing import List,  Dict,  Any, Literal, Optional
 import httpx, logging, uuid 
 
@@ -42,7 +42,7 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
         return response.json()
     
     @tool 
-    async def submit_job(runtime:ToolRuntime,
+    async def submit_job(runtime:ToolRuntime[Any],
                          job_description: str,
                          local_dir: str, 
                          provider_name: str,
@@ -166,9 +166,9 @@ def init_common_tools(model:BaseChatModel):
     )
 
 
-    collection = [sampling_ini_fin_states_on_surface,
-                  build_initial_nebpath_on_surface,
-                  sampling_single_ads_configs_on_surface]
+    collection = [build_ini_fin_structures_on_surface,
+                  build_nebpath_on_surface,
+                  build_adsorption_configs_on_surface]
     name_list = []
     for item in collection:
         if item.name in TOOLS_BY_NAME:
@@ -177,9 +177,9 @@ def init_common_tools(model:BaseChatModel):
         name_list.append(item.name)
 
     details = '''Tools:
-- `sampling_ini_fin_states_on_surface`: Given IS and FS molecules, attach them on a surface, all surface sites are considered.
-- `build_initial_nebpath_on_surface`: Given IS and FS, build neb path. This tool will handle some special cases, for example, it will adjust the structure if molecule dissociates in vacuum. 
-- `sampling_single_ads_configs_on_surface`: Attach an adsorbate on the surface, all surface sites are considered.
+- `build_ini_fin_structures_on_surface`: Given IS and FS molecules, attach them on a surface, automatically match the atomic indices, all surface sites are considered.
+- `build_nebpath_on_surface`: Given IS and FS, build neb path. This tool will handle some special cases, for example, it will adjust the structure if molecule dissociates in vacuum. 
+- `build_adsorption_configs_on_surface`: Attach an adsorbate on the surface, all surface sites are considered.
 '''
     TOOL_COLLECTIONS["structure_building_tools"] = ToolNamespace(
         description=f"Build initial and final states on a surface. Bind an adsorbate to a surface. Build the initial NEB paths. Use these tools for small-scale structure building tasks.\n{details}",
@@ -196,7 +196,7 @@ def init_common_tools(model:BaseChatModel):
         return {key:TOOL_COLLECTIONS[key].description for key in TOOL_COLLECTIONS.keys()}
 
     @tool
-    def load_tool_collection(tool_collection_name:str,  runtime:ToolRuntime) -> Command:
+    def load_tool_collection(tool_collection_name:str,  runtime:ToolRuntime[Any]) -> Command:
         '''
         Given a tool collection name, update the tool names which are accessible to the agent, so that they can be used by agent.
         Args:
@@ -229,7 +229,7 @@ def init_common_tools(model:BaseChatModel):
 
 
     @tool 
-    def pause_to_ask(runtime:ToolRuntime, 
+    def pause_to_ask(runtime:ToolRuntime[Any], 
                      message:str, 
                      type: Literal["any", "confirmation", "choice-single", "choice-multiple"] = "any",
                      meta_data:Dict[str, Any] = dict() ):
@@ -251,11 +251,11 @@ def init_common_tools(model:BaseChatModel):
 
 
 @tool 
-def get_workdir(runtime:ToolRuntime):
+def get_workdir(runtime:ToolRuntime[StepNodeContext]):
     '''
     Return the workdir path of current step.
     '''
-    return runtime.state["workdir"]
+    return runtime.context["step_workdir"]
 
 async def tool_call_wrapper(request:ToolCallRequest, handler):
     ask_arg_tool_msgs = {
@@ -277,7 +277,7 @@ async def tool_call_wrapper(request:ToolCallRequest, handler):
                         tool_call_id = req.tool_call["id"],
                         tool_name = tool_name,
                         current_args = req.tool_call["args"],
-                        # `args_schema` includes injected args such as `runtime: ToolRuntime`
+                        # `args_schema` includes injected args such as `runtime: ToolRuntime[Any]`
                         # and cannot be converted to JSON schema. `tool_call_schema`
                         # is the model-facing schema without those injected args.
                         args_schema = req.tool.tool_call_schema.model_json_schema() if req.tool and req.tool.tool_call_schema else {},
@@ -285,12 +285,15 @@ async def tool_call_wrapper(request:ToolCallRequest, handler):
         
         return Command(update={"interrupts": {req.tool_call["id"]: ask.model_dump(mode='python')} })
     if tool_name == "pause_to_ask":
+        # The model may omit optional args (`type`, `meta_data`), so do not
+        # index them directly: use the same defaults as the tool signature.
+        ask_args = req.tool_call.get("args") or {}
         obj = AgentInterrupt(pending=True,
-                            message= req.tool_call["args"]["message"],
+                            message= ask_args.get("message") or "",
                             tool_call_id = req.tool_call["id"],
                             tool_name="pause_to_ask",
-                            type = req.tool_call["args"]["type"],
-                            meta_data = req.tool_call["args"]["meta_data"])
+                            type = ask_args.get("type") or "any",
+                            meta_data = ask_args.get("meta_data") or dict())
         
         return Command(update={ "interrupts": {req.tool_call["id"]: obj.model_dump(mode="python")} }) 
     #return await handler(req)

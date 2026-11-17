@@ -143,11 +143,17 @@ async def _test_graph_seeding() -> None:
     init_node = catagent.nodes["init_skills"].bound.func
     command = init_node({"messages": []})
     assert command.goto == "orchestrator_node"
-    assert command.update == {"loaded_skills": initial}
+    assert command.update == {
+        "loaded_skills": initial,
+        "skill_artifacts_pathes": set(),
+    }
 
     command = init_node({"messages": [], "loaded_skills": {"existing": {}}})
     assert command.goto == "orchestrator_node"
-    assert not command.update, "an existing thread must keep its loaded skills"
+    assert command.update == {"skill_artifacts_pathes": set()}, (
+        "an existing thread must keep its loaded skills but still initialize "
+        "the skill artifact paths"
+    )
 
 
 def test_cli_option_default() -> None:

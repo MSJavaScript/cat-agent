@@ -6,15 +6,33 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, Send, interrupt
 from langgraph.graph.state import CompiledStateGraph
 from langchain.messages import HumanMessage
+from datetime import datetime
 
-from .workflow.models import WorkflowState, StepResult, Step, SkillMetadata
-from .workflow.orchestrator import create_orchestrator_agent, OrchestratorAgentState
+from .workflow.models import (
+    WorkflowState,
+    StepResult,
+    Step,
+    SkillMetadata,
+    WorkflowContext,
+    skill_artifacts_from_skills,
+)
+from .workflow.orchestrator import create_orchestrator_agent, OrchestratorAgentState, OrchestratorContext
 from .workflow.router import orchestrator_request_queue, router
+from .workflow.liveness import (
+    clear_step_run,
+    mark_step_finished,
+    mark_step_paused,
+    mark_step_running,
+    mark_step_scheduled,
+)
 from .stepnode.stepnode import create_stepnode_agent, InterruptState
+from .stepnode.models import StepNodeContext
 
 import logging
-from typing import Literal, TypedDict, Dict, Any
-import os, httpx, asyncio
+from typing import Literal, TypedDict, Dict, Any, Optional
+import os, httpx, asyncio, traceback
+from langgraph.errors import GraphBubbleUp
+from langgraph.runtime import Runtime
 
 logger = logging.getLogger("catagent")
 
@@ -24,12 +42,18 @@ class StepNodeInput(TypedDict, total=False):
     task_content: str 
     # Skills already loaded by the orchestrator, forwarded to the inner agent.
     loaded_skills: Dict[str, Any]
+    # Skill files/directories the StepNode may access outside the project.
+    skill_artifacts_pathes: set[str]
+    # Copied from the outer workflow so direct node calls (tests) still work.
+    project_workdir: str
     # 键是interrupt_id，值是针对interrupt的response
     interrupt_resume: Dict[str, Any]
 
-class InterruptNodeInput(TypedDict):
+class InterruptNodeInput(TypedDict, total=False):
     source:Literal["stepnode", "orchestrator"]
     step_id: str
+    workdir: str
+    project_workdir: str
     interrupt_ori_id: str 
     interrupt_payload: InterruptState
 
@@ -67,6 +91,51 @@ def release_orchestrator_sync(thread_id: str) -> None:
     _ORCHESTRATOR_CLAIMS.pop(thread_id, None)
 
 
+def _child_config(config: RunnableConfig, thread_id: str) -> Dict[str, Any]:
+    """Build the config for an inner graph on its own checkpoint thread.
+
+    The inner orchestrator and every StepNode are separate graph invocations,
+    so LangGraph applies the recursion limit per invocation.  Copy the
+    app-level limit to them as well; otherwise ``--recursion-limit`` would only
+    bound the outer workflow, which is not where the tool loops run.
+    """
+    child: Dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    recursion_limit = (config or {}).get("recursion_limit")
+    if recursion_limit is not None:
+        child["recursion_limit"] = recursion_limit
+    return child
+
+
+def _outer_workdirs(
+    runtime: Optional[Runtime],
+    state: Dict[str, Any],
+) -> tuple[str, Dict[str, str]]:
+    """Return (project_workdir, resource_dirs) for an inner-agent context.
+
+    The normal path is the outer graph runtime context supplied by
+    ``_stream_chat``.  ``state`` is a fallback for direct node calls in tests
+    and for older checkpoints that persisted ``project_workdir`` in the graph
+    state.
+    """
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    project_workdir = _context_value(context, "project_workdir")
+    resource_dirs = _context_value(context, "resource_dirs")
+    if not project_workdir:
+        project_workdir = state.get("project_workdir") or ""
+    if resource_dirs is None:
+        resource_dirs = state.get("resource_dirs") or {}
+    return project_workdir, resource_dirs
+
+
+def _context_value(context: Any, key: str) -> Any:
+    """Read a key from a dict-like or model-like runtime context."""
+    if context is None:
+        return None
+    if isinstance(context, dict):
+        return context.get(key)
+    return getattr(context, key, None)
+
+
 def _steps_delta(baseline: Dict[str, Step],
                  current: Dict[str, Step]) -> Dict[str, Any]:
     """Return only the step fields the orchestrator actually changed.
@@ -99,15 +168,34 @@ def node_set_flag(state:WorkflowState, config:RunnableConfig):
     if state.get("finalization", False):
         release_orchestrator_sync(config["configurable"]["thread_id"])
         return Command(goto=END)
+
+    MAXTIME = 300
+    now = datetime.now().timestamp()
+    # Drop requests that were dispatched but not acknowledged for MAXTIME.
+    # Until then the fingerprint stays in the queue, which is what prevents an
+    # identical request from being dispatched again.
+    requests = state.get("orchestrator_requests") or {}
+    if not isinstance(requests, dict):
+        requests = {}
+    outdated_requests = dict()
+    for key, request in requests.items():
+        if request.get("sent") and \
+            now - request.get("creation_timestamp", now) > MAXTIME:
+            outdated_requests[key] = None 
+
     # The orchestrator just changed the plan/step state, so let the router
     # re-check dependences and dispatch whatever is now ready.
-    return Command(goto="router", update={ "orchestrator_is_working": False })
+    return Command(goto="router", update={ "orchestrator_is_working": False,
+                                          "orchestrator_requests":outdated_requests })
 
 def create_catagent(model:BaseChatModel, 
                     job_manager_url:str,
                     http_client:httpx.AsyncClient,
                     checkpointer:Checkpointer,
                     loaded_skills:Dict[str, SkillMetadata] | None = None):
+
+    loaded_skills = loaded_skills or {}
+    # skill 文件所在的路径由 init_skills_node 写入 WorkflowState，StepNode 至多能访问它们。
 
     dirname = os.path.join(os.path.dirname(__file__), "system_skills")
     skill_path = []
@@ -163,74 +251,137 @@ def create_catagent(model:BaseChatModel,
             interrupts = (interrupts,)
         return list(interrupts)
 
-    async def step_node(state:StepNodeInput, config:RunnableConfig):
+    async def step_node(state:StepNodeInput,
+                        config:RunnableConfig,
+                        runtime: Optional[Runtime[WorkflowContext]] = None):
         logger.info(f"Enter step_node: step_id = {state.get('step_id')}, workdir = {state.get('workdir')}\ninterrupt_resume = {state.get('interrupt_resume')}.")
 
         writer = get_stream_writer()
         thread_id = config["configurable"]["thread_id"]
         step_id = state.get("step_id", "")
         chat_step_node_id = f"{thread_id}:{step_id}"
-        step_node_config = {"configurable": {"thread_id": chat_step_node_id}}
+        step_node_config = _child_config(config, chat_step_node_id)
+        project_workdir, resource_dirs = _outer_workdirs(runtime, state)
+        # A resumed call may not carry the step workdir in its Send arg.  The
+        # inner graph still needs it for get_workdir() and the path guard, so
+        # fall back to the project root rather than passing an empty string.
+        step_workdir = state.get("workdir") or project_workdir
+        step_context: StepNodeContext = {
+            "project_workdir": project_workdir,
+            "step_workdir": step_workdir,
+            "resource_dirs": resource_dirs,
+        }
 
-        interrupt_resume = state.get("interrupt_resume") or {}
-        if interrupt_resume: # 中断后接着运行
-            payloads = stepnode_agent.astream(input = Command(resume=interrupt_resume),
-                                              config = step_node_config,
-                                              stream_mode = ["custom", "updates"],
-                                              version = "v2")
-        else: # 首次运行
-            payloads = stepnode_agent.astream(
-                input={ # 强制要求 task_content 和workdir必须存在，否则报错
-                    "messages": [HumanMessage(content=state["task_content"])],
-                    "workdir": state["workdir"],
-                    "loaded_skills": state.get("loaded_skills") or {}},
-                config = step_node_config,
-                stream_mode = ["custom", "updates"],
-                version = "v2")
+        # Publish liveness *before* the first await so the request queue, which
+        # the router dispatches in the same superstep, can see that this step
+        # has an owner.  `mark_step_scheduled` in the router covers the narrow
+        # window before this node starts.
+        mark_step_running(thread_id, step_id, asyncio.current_task())
 
-        collected_interrupts = dict()
-        async for payload in payloads:
-            # payload 是一个字典
-            # 有三个键 type, ns 和 data。如果是updates类型，data只有一个键是节点名称
-            # {'type': 'custom', 'ns': (), 'data': {'messages': 'Hello'}}
-            if payload.get("type") == "updates" and "__interrupt__" in (payload.get("data") or {}):
-                for interrupt_obj in _interrupt_values(payload):
-                    collected_interrupts[interrupt_obj.id] = interrupt_obj.value
+        try:
+            interrupt_resume = state.get("interrupt_resume") or {}
+            if interrupt_resume: # 中断后接着运行
+                payloads = stepnode_agent.astream(input = Command(resume=interrupt_resume),
+                                                  config = step_node_config,
+                                                  context = step_context,
+                                                  stream_mode = ["custom", "updates"],
+                                                  version = "v2")
+            else: # 首次运行
+                payloads = stepnode_agent.astream(
+                    input={ # 强制要求 task_content 和workdir必须存在，否则报错
+                        "role": "StepNode",
+                        "stepnode_finalization": False,
+                        "messages": [HumanMessage(content=state["task_content"])],
+                        "workdir": state["workdir"],
+                        "loaded_skills": state.get("loaded_skills") or {},
+                        "skill_artifacts_pathes": set(state.get("skill_artifacts_pathes") or set())},
+                    config = step_node_config,
+                    context = step_context,
+                    stream_mode = ["custom", "updates"],
+                    version = "v2")
+
+            collected_interrupts = dict()
+            async for payload in payloads:
+                # payload 是一个字典
+                # 有三个键 type, ns 和 data。如果是updates类型，data只有一个键是节点名称
+                # {'type': 'custom', 'ns': (), 'data': {'messages': 'Hello'}}
+                if payload.get("type") == "updates" and "__interrupt__" in (payload.get("data") or {}):
+                    for interrupt_obj in _interrupt_values(payload):
+                        collected_interrupts[interrupt_obj.id] = interrupt_obj.value
+                else:
+                    writer({"source":chat_step_node_id, **payload })
+
+            # 这里收集的中断可能是很多个提交作业的中断
+            if collected_interrupts:
+                send_list = [Send("interrupt_node", arg={
+                    "source": "stepnode",
+                    "step_id": step_id,
+                    "workdir": state.get("workdir", ""),
+                    "project_workdir": project_workdir,
+                    "interrupt_ori_id": key,
+                    "interrupt_payload": collected_interrupts[key]
+                }) for key in collected_interrupts.keys()]
+                command = Command(goto=send_list)
             else:
-                writer({"source":chat_step_node_id, **payload })
+                stepnode_state = await stepnode_agent.aget_state(config=step_node_config)
+                raw_step_result = stepnode_state.values.get("step_result") or {}
+                if hasattr(raw_step_result, "model_dump"):
+                    raw_step_result = raw_step_result.model_dump(mode="python")
 
-        # 这里收集的中断可能是很多个提交作业的中断
-        if collected_interrupts:
-            send_list = [Send("interrupt_node", arg={
-                "source": "stepnode",
-                "step_id": step_id,
-                "interrupt_ori_id": key,
-                "interrupt_payload": collected_interrupts[key]
-            }) for key in collected_interrupts.keys()]
-            return Command(goto=send_list)
+                step_result = StepResult(status=raw_step_result.get("status", "error"),
+                                         processed=False,
+                                         step_id=step_id,
+                                         summary=raw_step_result.get("summary", ""),
+                                         artifacts=raw_step_result.get("output_artifacts", {}))
 
-        stepnode_state = await stepnode_agent.aget_state(config=step_node_config)
-        raw_step_result = stepnode_state.values.get("step_result") or {}
-        if hasattr(raw_step_result, "model_dump"):
-            raw_step_result = raw_step_result.model_dump(mode="python")
+                # 转到router，更新steps_result
+                command = Command(goto="router",
+                                  update={ "step_results": {step_id: step_result} })
+        except asyncio.CancelledError:
+            # A cancelled run (shutdown, client disconnect) must not look like
+            # a live StepNode after the event loop comes back.
+            clear_step_run(thread_id, step_id)
+            raise
+        except GraphBubbleUp:
+            # Control-flow exceptions (interrupts) must reach LangGraph.
+            clear_step_run(thread_id, step_id)
+            raise
+        except Exception as exc:
+            # An uncaught exception used to abort the whole superstep: the
+            # queue's writes were discarded, `Step.status` stayed "running" and
+            # nothing ever moved the workflow again.  Convert it into the same
+            # StepResult the router already knows how to correct.
+            clear_step_run(thread_id, step_id)
+            logger.exception(f"StepNode {step_id} crashed.")
+            summary = traceback.format_exc()
+            if len(summary) > 4000:
+                summary = "..." + summary[-4000:]
+            if not step_id:
+                # Nothing to attribute the failure to; keep the old behaviour.
+                raise
+            return Command(goto="router", update={
+                "step_results": {step_id: StepResult(
+                    status="error",
+                    processed=False,
+                    step_id=step_id,
+                    summary=f"StepNode crashed: {type(exc).__name__}: {exc}\n\n{summary}",
+                    artifacts={})}
+            })
 
-        step_result = StepResult(status=raw_step_result.get("status", "error"),
-                                 processed=False,
-                                 step_id=step_id,
-                                 summary=raw_step_result.get("summary", ""),
-                                 artifacts=raw_step_result.get("output_artifacts", {}))
-
-        # 转到router，更新steps_result
-        return Command(goto="router",
-                       update={ "step_results": {step_id: step_result} })
+        mark_step_finished(thread_id, step_id)
+        return command
 
     
 
-    async def orchestrator_node(state:OrchestratorAgentState, config:RunnableConfig):
+    async def orchestrator_node(state:OrchestratorAgentState,
+                                config:RunnableConfig,
+                                runtime: Optional[Runtime[WorkflowContext]] = None):
         # A resume enters this node through Send(..., {"interrupt_resume": ...}),
         # so the outer state (messages/steps) is not part of ``state`` here.
         last_message = state["messages"][-1].content if state.get("messages") else "<none>"
-        logger.info(f"Enter orchestrator_node. last messages = {last_message}\ninterrupt_resume = {state.get('interrupt_resume')}")
+
+        length = len(last_message)
+        logger.info(f"Enter orchestrator_node. last messages = {last_message[:250] if length > 250 else last_message}\ninterrupt_resume = {state.get('interrupt_resume')}")
 
         writer = get_stream_writer()
         # 这里假设它必须提供thread_id
@@ -239,8 +390,11 @@ def create_catagent(model:BaseChatModel,
         # subgraph.  It must use a different checkpoint thread from the outer
         # workflow, otherwise both graphs overwrite each other's state when
         # they share the same checkpointer.
-        orchestrator_config = {
-            "configurable": {"thread_id": f"{thread_id}:orchestrator"}
+        orchestrator_config = _child_config(config, f"{thread_id}:orchestrator")
+        project_workdir, resource_dirs = _outer_workdirs(runtime, state)
+        orchestrator_context: OrchestratorContext = {
+            "project_workdir": project_workdir,
+            "resource_dirs": resource_dirs,
         }
         orchestrator_lock, orchestrator_claimed = get_orchestrator_sync(thread_id)
         orchestrator_claimed.clear()
@@ -248,10 +402,10 @@ def create_catagent(model:BaseChatModel,
         async with orchestrator_lock:
             interrupt_resume = state.get("interrupt_resume") or {}
             baseline_steps = state.get("steps") or {}
-
             if interrupt_resume:
                 payloads = orchestrator_agent.astream(input=Command(resume=interrupt_resume),
                                                       config = orchestrator_config,
+                                                      context = orchestrator_context,
                                                       stream_mode=["custom", "updates"],
                                                       version="v2")  
             else:
@@ -263,10 +417,18 @@ def create_catagent(model:BaseChatModel,
                     # 回头更新WorkflowState的steps字段
                     return Command(goto="node_set_flag",
                                    update={"steps": state.get("steps", {})})
+
+                # `steps` is the full outer snapshot taken when this request
+                # was dispatched.  Applying it to the inner graph makes the
+                # orchestrator work on the same status/workdir/
+                # need_further_planning values the router sees; the delta on
+                # the way back still protects concurrent outer updates.
                 agent_input = {key:state[key] for key in state.keys() if key != "messages"}
                 agent_input["messages"] = [ messages[-1] ]
+                agent_input["role"] = "Orchestrator"
                 payloads = orchestrator_agent.astream(input = agent_input,
                                                       config = orchestrator_config,
+                                                      context = orchestrator_context,
                                                       stream_mode = ["custom", "updates"],
                                                       version = "v2")
 
@@ -282,6 +444,7 @@ def create_catagent(model:BaseChatModel,
                 send_list = [Send("interrupt_node", arg={
                     "source": "orchestrator",
                     "step_id": "",
+                    "project_workdir": project_workdir,
                     "interrupt_ori_id": key,
                     "interrupt_payload": collected_interrupts[key]
                 }) for key in collected_interrupts.keys()]
@@ -289,6 +452,7 @@ def create_catagent(model:BaseChatModel,
 
             lastest_state = await orchestrator_agent.aget_state(config=orchestrator_config)
             post_steps = lastest_state.values.get("steps", {}) or {}
+            post_skills = lastest_state.values.get("loaded_skills", {}) or {}
             if interrupt_resume:
                 # A resumed turn must return the whole inner state: changes made
                 # before the interrupt were never synced to the outer workflow.
@@ -302,14 +466,27 @@ def create_catagent(model:BaseChatModel,
             return Command(goto="node_set_flag",
                            update={
                                "steps": steps_update,
-                               "loaded_skills": lastest_state.values.get("loaded_skills", {}),
+                               "loaded_skills": post_skills,
+                               # Skills loaded during this turn must be usable by
+                               # the StepNodes dispatched in the next superstep.
+                               "skill_artifacts_pathes":
+                                   skill_artifacts_from_skills(post_skills),
                                "finalization": lastest_state.values.get("finalization", False)
                            })
 
     def interrupt_node(state:InterruptNodeInput, config:RunnableConfig):
         logger.info(f"Enter interrupt_node. source = {state['source']}, step_id = {state['step_id']}.")
+        thread_id = config["configurable"]["thread_id"]
         if state['interrupt_payload']["kind"] == "JobSubmission":
             logger.info(f"JobSubmission interrupt. step_id = {state['step_id']}.")
+
+        # A paused step is *not* dead.  Mark it before suspending so the request
+        # queue does not mistake `status == "running"` with no StepNode task for
+        # a crash (this matters when a sibling step finishes while this one is
+        # waiting for the user).  The mark survives the GraphInterrupt; it is
+        # replaced by `scheduled` when the node runs again after the resume.
+        if state["source"] == "stepnode":
+            mark_step_paused(thread_id, state.get("step_id", ""))
 
         # 该节点把内层agent发送的interrupt二次发送到外部
         # Attach the producing source to the value for the debug UI.  The
@@ -317,7 +494,6 @@ def create_catagent(model:BaseChatModel,
         # resume response is unaffected because it never reads the value back.
         value = state["interrupt_payload"]
         if isinstance(value, dict):
-            thread_id = config["configurable"]["thread_id"]
             if state.get("source") == "stepnode":
                 debug_source = f"{thread_id}:{state.get('step_id', '')}"
             elif state.get("source") == "orchestrator":
@@ -325,18 +501,26 @@ def create_catagent(model:BaseChatModel,
             else:
                 debug_source = None
             value = {**value, "_debug_source": debug_source}
-        response = interrupt(value=value)
+        try:
+            response = interrupt(value=value)
+        except GraphBubbleUp:
+            # Still suspended: keep the `paused` mark for the next superstep.
+            raise
         # The outer interrupt id is not the id used by the inner graph.  Keep
         # the original id so the answer can be routed back to the exact inner
         # interrupt when several interrupts are pending at the same time.
         resume_map = {state["interrupt_ori_id"]: response}
         if state["source"] == "orchestrator":
             return Command(goto=Send("orchestrator_node",
-                                     arg={"interrupt_resume": resume_map}))
+                                     arg={"interrupt_resume": resume_map,
+                                          "project_workdir": state.get("project_workdir", "")}))
         else:
             # 这里不需要设置workdir，直接resume，原来的workdir不会被覆盖
+            mark_step_scheduled(thread_id, state.get("step_id", ""))
             return Command(goto=Send("step_node",
                                      arg={"step_id": state["step_id"],
+                                          "workdir": state.get("workdir", ""),
+                                          "project_workdir": state.get("project_workdir", ""),
                                           "interrupt_resume": resume_map}))
 
     async def orchestrator_request_queue_node(state:WorkflowState,
@@ -357,7 +541,7 @@ def create_catagent(model:BaseChatModel,
 
         orchestrator_claimed.set()
         try:
-            command = await orchestrator_request_queue(state)
+            command = await orchestrator_request_queue(state, config)
         except BaseException:
             orchestrator_claimed.clear()
             raise
@@ -369,18 +553,17 @@ def create_catagent(model:BaseChatModel,
             orchestrator_claimed.clear()
         return command
 
-    initial_skills = loaded_skills or {}
-
+    
     def init_skills_node(state:WorkflowState):
-        # Seed a fresh thread with the configured skill index.  A thread that
-        # already has skills (for example after loading one from the file
-        # system) keeps them across user turns.
-        if state.get("loaded_skills") or not initial_skills:
-            return Command(goto="orchestrator_node")
-        return Command(goto="orchestrator_node",
-                       update={"loaded_skills": dict(initial_skills)})
+        skills = state.get("loaded_skills") or loaded_skills
+        updates: Dict[str, Any] = {
+            "skill_artifacts_pathes": skill_artifacts_from_skills(skills)
+        }
+        if not state.get("loaded_skills"):
+            updates["loaded_skills"] = loaded_skills
+        return Command(goto="orchestrator_node", update=updates)
 
-    graph = StateGraph(WorkflowState)
+    graph = StateGraph(WorkflowState, context_schema=WorkflowContext)
     graph.add_node("init_skills", init_skills_node)
     graph.add_node("orchestrator_node", orchestrator_node)
     graph.add_node("node_set_flag", node_set_flag)

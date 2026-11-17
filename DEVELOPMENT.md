@@ -383,4 +383,131 @@ so they do not appear in the schema. Keep a hand-written TypeScript mirror of
 - Long streams survive the reverse proxy (heartbeat, no buffering).
 - The existing deterministic checks still pass:
   `check/test_debug_ui.py`, `check/test_app_skill_init.py`,
-  `check/test_cli_jobs.py`, `check/test_agent_state_sync.py`.
+  `check/test_cli_jobs.py`, `check/test_agent_state_sync.py`,
+  `check/test_agent_liveness.py`.
+
+---
+
+## 7. StepNode liveness: design, caveats and future work
+
+### Why workflow state is not enough
+
+`Step.status` is written by the router and records *intent*: "this step should be
+running". It is not a heartbeat and cannot answer "is the coroutine still
+alive?". The experiments behind this design (not kept in the repo) showed:
+
+| Event | `steps[x]` | checkpoint `next` | durable marker |
+| --- | --- | --- | --- |
+| running normally | `running` | `('step_node',)` | none |
+| node raises | `running` | `('step_node',)` | `__error__` only in **pending writes**, discarded on the next commit / `update_state` |
+| `SIGKILL` | `running` | `('step_node',)` | none: the DB is byte-identical to the live case |
+| `task.cancel()` | `running` | `('step_node',)` | none; the node re-runs on the next invoke |
+
+A node also cannot introspect its own pause: calling `graph.aget_state()`
+inside a node returns the *previous* committed snapshot (`next=()` and
+`interrupts=[]`), not the state of the superstep being executed.
+
+Therefore liveness comes from two layers:
+
+1. **`step_node` never lets an ordinary exception escape.** It converts a crash
+   into a normal `StepResult(status="error")`, which the router already knows
+   how to correct (`router.py`, the `result.status == "error"` branch).
+   `asyncio.CancelledError` and `GraphBubbleUp` (interrupts) are re-raised,
+   because they are control flow, not a step result.
+2. **`catagent/workflow/liveness.py`** is an in-process registry of actual
+   `asyncio` tasks, keyed by `(thread_id, step_id)`. The router/queue consult
+   it instead of trusting the status string.
+
+Lifecycle and queue semantics:
+
+| Phase | Meaning | Request queue |
+| --- | --- | --- |
+| `scheduled` | router dispatched `Send("step_node", ...)`, node not started | wait (`END`) |
+| `running` | node executing, registry holds its task | wait |
+| `finished` | node returned, `StepResult` on its way to the router | wait |
+| `paused` | outer `interrupt_node` waiting for the user | wait |
+| absent (`DEAD`) + `status == "running"` | nothing will produce a result | report error and go to `router` |
+
+The `scheduled` placeholder is written synchronously by `router()` *before* it
+returns the `Send` list. Without it the queue, which is dispatched in the same
+superstep, can run before `step_node` registers and would declare a healthy
+step dead.
+
+The `paused` phase is equally important: when a sibling step finishes, the
+queue runs while another step is waiting for a HITL answer. "running + no task"
+would be a false positive without that mark.
+
+`finished` closes the window between `step_node` returning and `router`
+consuming its result. If the record were deleted on return, a fast step could
+look dead to the queue of the same superstep.
+
+The queue's current behaviour for a dead step: emit `StepResult(error)` and
+`goto="router"` instead of `END`. The router marks the step `failed` and
+queues the normal correction request, so the orchestrator can retry, re-plan or
+skip the step. A stale `running` therefore heals on the next user turn (or
+immediately, if the crash happened inside the same run).
+
+### Caveats
+
+- **Single process only.** The registry is per process. The app already relies
+  on that assumption (`uvicorn.Config(app)` with the default single worker and
+  the in-memory orchestrator locks), but running multiple workers or moving to
+  a multi-process server would make a step look dead to every process except
+  the owner. A durable lease table is required first (see below).
+- **Liveness is not progress.** A node blocked in an LLM call, a tool, or a
+  network read is "alive" forever. The registry says nothing about whether it
+  is making progress; there is no timeout or heartbeat yet.
+- **A hard kill between checkpoint commit and registry write is invisible.**
+  The step is `running`, the registry is gone, and the next run reports it as
+  crashed. That is the intended heuristic, but it means an unlucky crash could
+  be reported as "crashed" even though the work had just completed. The result
+  would be a retry; the step contract must therefore stay idempotent enough.
+- **No global startup sweep.** After a restart, a dead step is reconciled only
+  when its thread runs again (a user message, a job callback, a resume). There
+  is no index of threads to scan at startup.
+- **Paused steps after restart.** The `paused` mark is in memory and is lost on
+  restart. This is safe today because the graph is still suspended at
+  `interrupt_node`; the queue is not executed until the user resumes, and the
+  resume path re-marks the step before dispatching it. Adding a background
+  reconciler would require reconstructing pause state from checkpoint pending
+  writes first.
+- **The crash marker in the checkpoint is ephemeral.** `__error__` lives only in
+  `pending_writes`; the next `update_state` or superstep commit clears it. Do
+  not build recovery logic on it.
+- **Retrying a crashed thread re-runs the failed task.** `invoke(None)` after a
+  crash re-executes `step_node` from the outer checkpoint, which resumes the
+  inner StepNode graph from its own checkpoint. `aupdate_state(...)` clears the
+  pending task and can leave `next=()`, so it is not a general-purpose resume.
+  If a failed step is retried forever, a retry budget is needed.
+- **The queue only checks when there are no orchestrator requests.** If a
+  request is pending, it is dispatched first; the dead-step check happens on a
+  later pass. That is deliberate (the orchestrator may already know how to fix
+  the step) but means reconciliation is not the very first thing that happens.
+- **`--recursion-limit` is per graph invocation.** It is copied to the outer
+  workflow, the orchestrator and every StepNode (`_child_config` in
+  `agent.py`). It does not bound the total work of a run: several inner graphs
+  each get the full budget, and a long job wait is not a superstep.
+
+### Future work
+
+1. **Durable leases** for multi-process deployments: a `step_runs` table in the
+   same SQLite DB with `(thread_id, step_id, run_id, pid, boot_id, phase,
+   heartbeat_at)`. The queue reads it instead of the dict; startup can scan it
+   to find orphaned runs, and a heartbeat can distinguish a hung runner from a
+   healthy one.
+2. **Progress watchdog.** Record the last streamed payload time per step (or a
+   heartbeat in the lease) and surface "no progress for N minutes" without
+   killing the step automatically. Combine with client-side timeouts for LLM
+   and tool calls.
+3. **Startup reconciliation endpoint.** `/recover` (or a startup task over a
+   thread index) that marks orphaned `running` steps as failed and re-invokes
+   the queue, so recovery does not wait for the next user message.
+4. **Retry budget per step.** Count recoveries in `StepResult.summary` or a
+   side table; after N crashes, set the step `failed` permanently and hand it
+   to the orchestrator instead of retrying.
+5. **Pause reconstruction.** Persist the `paused` phase (lease or checkpoint
+   scan) so a future background reconciler can distinguish paused from dead
+   after a restart.
+6. **Cancellation policy.** Today cancelling the HTTP stream cancels the graph
+   run; decide whether a disconnect should stop the work or detach it, and
+   reconcile that with the liveness phases.

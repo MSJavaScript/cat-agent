@@ -1,7 +1,7 @@
 from langgraph.graph.message import add_messages
 from langchain_core.messages import AnyMessage
 from typing import TypedDict, Annotated, List, Dict, Literal, Optional, Set, Tuple, Any 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from copy import deepcopy
 from typing import NamedTuple
 
@@ -30,14 +30,13 @@ class RawPlan(BaseModel):
     steps: List[RawStep] = Field(description="List of plan steps.", default_factory=list)
 
     topology: List[Tuple[int, int]] = Field(description="Workflow execution topology, a directed acyclic graph. Step is represented by the index, each tuple represents an edge in the graph. For example, `[(0,1),(1,2)]` represents the sequential execution of '0→1→2'. `[(0,1),(0,2)]` represents parallel branches '0→1' and '0→2'. If a step idx does not connect to any other step, use (idx, idx) to represent an isolated node.", default_factory=list)
-
 class Step(BaseModel):
     step_id: str # 格式 plan-数字:step-数字:名字
-    status: Literal["pending", "done", "failed", "running", "cancelled"] = "pending"
-    preparation_stage: Literal["done", "ongoing", "notyet"] = "notyet"
+    status: Literal["pending", "done", "running", "deleted"] = "pending"
+    preparation_done: bool = False 
     workdir: str = ""
     
- 
+    n_times: int = 0 # 这个步骤运行了多少次？
     need_further_planning: bool = False 
     content: str = ""
     related_skills: Set[str] = set() 
@@ -51,9 +50,7 @@ class Step(BaseModel):
 class StepResult(BaseModel):
     status: Literal["success", "error"] = "success"
     processed: bool = False # 是否已经处理了该结果
-    step_id: str  # 格式 plan-数字:step-数字:名字
     summary: str  # 该步骤的总结。输出了什么，如果有错误是什么错误
-    artifacts: Dict[str, str] # 输出的关键文件
     
 # Skill相关的数据结构
 class SkillArtifact(TypedDict):
@@ -66,6 +63,73 @@ class SkillMetadata(TypedDict):
     summary: str #总结
     references: Optional[List[SkillArtifact]]
     scripts: Optional[List[SkillArtifact]]
+
+class OrchestratorRequest(TypedDict):
+    sent: bool
+    creation_timestamp: float # The timestamp when this request is created
+    payload: Dict[str, Any]
+
+
+def orchestrator_request_reducer(
+    current: Optional[Dict[str, OrchestratorRequest]],
+    update: Optional[Dict[str, Any]],
+) -> Dict[str, OrchestratorRequest]:
+    """Merge the request queue keyed by the payload fingerprint.
+
+    ``router`` writes a complete request for every fingerprint it generates.
+    If that fingerprint is already queued, the stored entry is kept: resetting
+    it would clear ``sent`` and make a later router pass dispatch the very
+    same request again.  Lifecycle patches from the queue such as
+    ``{"sent": True}`` are merged into the stored entry instead of replacing
+    it.
+
+    ``None`` removes an entry (used by ``node_set_flag`` to drop expired
+    requests).  A queue written by the old list-based format is ignored; the
+    router regenerates whatever is still needed.
+    """
+    if not isinstance(current, dict):
+        current = {}
+    result = dict(current)
+    for key, value in (update or {}).items():
+        if value is None:
+            result.pop(key, None)
+            continue
+        if not isinstance(value, dict):
+            continue
+        existing = result.get(key)
+        if existing is None:
+            result[key] = value
+            continue
+        if "payload" in value:
+            # Same request generated again: keep the lifecycle state
+            # (especially `sent`) and the original creation time.
+            continue
+        merged = dict(existing)
+        merged.update(value)
+        result[key] = merged
+    return result
+
+
+def skill_artifacts_from_skills(
+    loaded_skills: Dict[str, SkillMetadata],
+) -> Set[str]:
+    """Return every reference/script path of the loaded skills.
+
+    StepNodes may access these files even when they live outside the project
+    workdir (skills are installed elsewhere).  Both the router and the graph
+    entry node derive the allow-list from this helper, so a skill loaded during
+    an orchestrator turn is usable by the steps dispatched in the same turn.
+    """
+    artifacts: Set[str] = set()
+    for value in (loaded_skills or {}).values():
+        if not isinstance(value, dict):
+            continue
+        for key in ("references", "scripts"):
+            for artifact in value.get(key) or []:
+                if isinstance(artifact, dict) and artifact.get("path"):
+                    artifacts.add(artifact["path"])
+    return artifacts
+
 
 # 用于Agent的结构化输出，需要字段描述
 class SkillSummaryOutput(BaseModel):
@@ -88,6 +152,8 @@ def list_reducer(current:list, update) -> list:
         return [current[i] for i in range(n) if not i in update.indices]
     if isinstance(update, list):  
         return current + update
+    if isinstance(update, tuple): # 更新某个元素，(idx, item)
+        return current[:update[0]] + [update[1]] + current[(update[0]+1):]
     return current + [update] 
 
 def dict_reducer(current:dict, update:dict) -> dict:
@@ -109,20 +175,40 @@ def dict_reducer(current:dict, update:dict) -> dict:
     return result
 
 
-class WorkflowState(TypedDict, total=False):
+class WorkflowContext(TypedDict, total=False):
+    """Context shared by the outer workflow and its inner agents."""
+
+    project_workdir: str  # 整个项目的工作路径
+    # 键是目录绝对路径，值是目录说明，例如其中包含什么文件
+    resource_dirs: Dict[str, str]
+
+
+class WorkflowState(TypedDict, total=False): 
     # Initial user input arrives here; later nodes only read it when they need
     # to start a fresh orchestrator turn.
     messages: Annotated[List[AnyMessage], add_messages]
 
+    # The project root selected by the client (debug UI) or the CLI process
+    # cwd.  Persisted with the thread so resumes that only carry an interrupt
+    # id still know which directory the StepNodes may access.
+    project_workdir: str
+    resource_dirs: Dict[str, str]
+
     orchestrator_is_working: bool
     finalization: bool
-    orchestrator_requests: Annotated[List[Dict[str, Any]], list_reducer]
+
+    # Key is the fingerprint (hash) of the request payload.
+    orchestrator_requests: Annotated[
+        Dict[str, OrchestratorRequest], orchestrator_request_reducer
+    ]
 
     steps: Annotated[Dict[str, Step], dict_reducer] # 唯一与orchestrator共享的字段
     step_results: Annotated[Dict[str, StepResult], dict_reducer]
     # Skills loaded by the orchestrator. StepNode receives a copy so it can
     # call get_skill_content() without loading the skill again.
     loaded_skills: Annotated[Dict[str, SkillMetadata], dict_reducer]
+    
+    skill_artifacts_pathes: Annotated[Set[str], lambda a,b: {*(a or set()), *(b or set())}]
 
 
 

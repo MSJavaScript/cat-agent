@@ -1,4 +1,5 @@
 source /mnt/t/softwares_install/lang-graph/bin/activate
+export PYTHONPATH="/mnt/t/programming/myagents/cat-agent-dev:$PYTHONPATH"
 python -m catagent.app --serve \
     --dotenv /home/luandong/bin/.env \
     --db /mnt/t/workdir/agent_test/db/catagent_checkpoints.db \

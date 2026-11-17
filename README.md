@@ -274,6 +274,45 @@ for `JobSubmission`, optionally posts `{job_uuid, thread_id, interrupt_id}` to
 jobmanager's `/set-thread-id`. That registration is what lets jobmanager POST a
 `JobResult` back and resume the graph.
 
+### StepNode liveness and crash recovery
+
+`Step.status` is written by the router and records intent, not runtime truth.
+An uncaught StepNode exception and a killed server both leave a step at
+`status="running"` with no durable marker (the `__error__` pending write is
+cleared by the next commit), so the request queue cannot use the status string
+to decide whether to wait.
+
+Two protections keep a dead StepNode from hanging the workflow:
+
+1. `step_node` never lets an ordinary exception escape. It logs the traceback
+   and publishes `StepResult(status="error")` to the router, which enters its
+   normal correction phase (mark the step `failed`, ask the orchestrator to fix
+   or re-plan). `asyncio.CancelledError` and LangGraph control-flow exceptions
+   (`GraphBubbleUp`, e.g. an interrupt) are re-raised.
+2. `catagent/workflow/liveness.py` keeps an in-process registry of the actual
+   `asyncio` task for every `(thread_id, step_id)`, and the request queue
+   consults it at `router.py:orchestrator_request_queue`:
+
+| Phase | Meaning | Queue |
+| --- | --- | --- |
+| `scheduled` | router dispatched the step, node not started | wait (`END`) |
+| `running` | node executing | wait |
+| `finished` | node returned, result on its way to the router | wait |
+| `paused` | outer `interrupt_node` waiting for the user | wait |
+| absent + `status == "running"` | crashed, cancelled or server restarted | report an error result and go to `router` |
+
+The router writes the `scheduled` placeholder before returning the `Send` list,
+so the queue task dispatched in the same superstep cannot mistake a healthy step
+for a dead one. The `paused` phase keeps a HITL step alive when a sibling step
+finishes while it waits for the user.
+
+A stale `running` step therefore heals on the next turn: the queue routes it to
+the router, which marks it `failed` and asks the orchestrator to retry or
+re-plan. `check/test_agent_liveness.py` pins this contract. See
+[DEVELOPMENT.md](DEVELOPMENT.md#7-stepnode-liveness-design-caveats-and-future-work)
+for the assumptions, the multi-process durable-lease design, and the cases this
+does **not** cover (a live but hung node, startup sweeps, retry budgets).
+
 ### Job submission flow
 
 ```text
@@ -431,6 +470,45 @@ checkpointer, and the compiled graph from these values.
 The test helper in `check/common.py` additionally looks for
 `/home/luandong/bin/.env` and `catagent/jobmanager/.env`.
 
+### Recursion limit
+
+`--recursion-limit N` bounds the number of LangGraph supersteps per graph
+invocation. It is available on both `catagent cli` and `catagent server` (and on
+`python -m catagent.app`), and it is copied to the inner orchestrator and to
+every StepNode as well, because each of them is a separate graph invocation:
+
+```bash
+catagent server --recursion-limit 200 ...
+catagent cli --recursion-limit 200 ...
+```
+
+When the flag is omitted, LangGraph's own default applies
+(`LANGGRAPH_DEFAULT_RECURSION_LIMIT`, `10007` in the pinned version). The limit
+is per invocation, not a total budget: a run with several StepNodes can consume
+more supersteps overall, and a long job wait is not a superstep. Hitting the
+limit raises `GraphRecursionError`; the server reports it as an error payload
+and the CLI prints it.
+
+### Project workdir
+
+Every thread has one **project workdir**: the root directory its StepNodes may
+read and write. Skill artifact paths (the scripts/references of the loaded
+skills) are the only files outside it that `execute_shell` may touch;
+`read_file` and `edit_file` stay project-only. Paths are resolved before the
+check, so `..` and symlinks cannot escape it.
+
+- **Debug UI** (`GET /`): creating a new thread opens a dialog asking for the
+  workdir. The value is stored in `localStorage` and sent as `workdir` with the
+  first message. If the server rejects it (for example the directory does not
+  exist), the dialog reopens with the error.
+- **HTTP clients**: `POST /chat` accepts an optional `workdir` for a new
+  thread. When omitted, the server process cwd is used, matching the CLI.
+- **CLI** (`catagent cli`): the directory the CLI is started from is the
+  project workdir; it prints `The current project dir is ...` at startup.
+
+The value is persisted in the thread state, so follow-up messages and interrupt
+resumes do not need to resend it.
+
 ### Skill index
 
 `--skill-index-json` is optional: by default `catagent` uses the bundled
@@ -485,10 +563,13 @@ python -m check.test_planner_tool
 python -m check.test_register_raw_plan
 python -m check.test_agent_stepnode
 python -m check.test_agent_state_sync
+python -m check.test_agent_liveness
 python -m check.test_jobmanager_recovery
 python -m check.test_cli_jobs
 python -m check.test_app_skill_init
 python -m check.test_debug_ui
+python -m check.test_parse_path
+python -m check.test_path_guard
 ```
 
 Real-LLM tests (require credentials; can take 5–20 minutes):
@@ -558,6 +639,12 @@ backend, server routes, real uvicorn startup, and live remote mode.
     `get_skill_summaries`, `get_skill_content` and
     `load_skill_from_filesystem` messages to 100 characters. Never truncate the
     `ToolMessage` itself; the model needs the full skill text.
+12. **A `running` step must have an owner.** Never infer liveness from
+    `Step.status`; ask `catagent/workflow/liveness.py`. Any new code that
+    dispatches a step node must `mark_step_scheduled` before returning the
+    `Send`, and any code that suspends on an interrupt for a step must
+    `mark_step_paused`. `step_node` converts crashes into error `StepResult`s on
+    purpose; do not let its exceptions escape again.
 
 ### The `app` package
 

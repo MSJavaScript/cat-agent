@@ -1,6 +1,12 @@
-from langchain.tools import tool
+from langchain.tools import tool, ToolRuntime
+from langgraph.types import Command
+from langchain.messages import ToolMessage
+
 import asyncio, aiofiles, os, shlex, glob
 from typing import List, Optional, Literal
+from pathlib import Path
+from .models import JobManagerAgentContext
+from catagent.tools.other.parse_path import parse_path
 from pathlib import Path
 
 _MARKDOWN_EXTENSIONS = (".md", ".markdown", ".mdx")
@@ -56,8 +62,18 @@ def _filter_markdown(stdout: str) -> str:
         if not _is_markdown_line(line)
     )
 
+_SAFE_DEVICE_PATHS = {
+    "/dev/null",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+}
+
 @tool
-async def execute_shell(command: str, cwd: str = None, timeout: int = 60) -> dict:
+async def execute_shell(runtime:ToolRuntime[JobManagerAgentContext],
+                        command: str, 
+                        cwd: str, 
+                        timeout: int = 60) -> dict:
     """
     Execute a shell command. Tips: Use `cat`, `head`, `grep`, `sed`, `awk` or `echo` etc. to quickly read or edit files. 
     Args:
@@ -65,6 +81,51 @@ async def execute_shell(command: str, cwd: str = None, timeout: int = 60) -> dic
         cwd: Current working directory.
         timeout: Time limit for command execution (in seconds).
     """
+    forbidden = {'curl', 'wget', 'requests', 'httpx', 'aiohttp', 'urllib3'}
+    for item in shlex.split(command):
+        for forbid_item in forbidden:
+            if forbid_item in item:
+                return Command(update={
+                    "messages": [ToolMessage(
+                                    status="error",
+                                    content=f"Error: Find {forbid_item} in command, you are not allowed to send requests by execute_shell.",
+                                    tool_call_id=runtime.tool_call_id,
+                                    name="execute_shell"
+                                )]
+                })
+
+    if not os.path.isdir(cwd):
+        return Command(update={
+            "messages": [ToolMessage(
+                            status="error",
+                            content=f"Error: {cwd} is not a directory.",
+                            tool_call_id=runtime.tool_call_id,
+                            name="execute_shell"
+                        )]
+        })
+
+    local_dir = runtime.context.local_dir
+    if local_dir and os.path.isdir(local_dir):
+        local_dir = Path(os.path.expandvars(os.path.expanduser(local_dir))).resolve()
+
+        extacted_pathes = [cwd]
+        extacted_pathes.extend(parse_path(command, cwd))
+
+        for p in extacted_pathes:
+            if p in _SAFE_DEVICE_PATHS:
+                continue
+
+            path = Path(os.path.expandvars(os.path.expanduser(p)))
+            if path.is_file() or path.is_dir():
+                if not path.resolve().is_relative_to(local_dir):
+                    return Command(update={
+                            "messages": [ToolMessage(
+                                            status="error",
+                                            content=f"Access denied, cannot access {str(path)}. You are only allowed to access files in {runtime.context.local_dir}.",
+                                            tool_call_id=runtime.tool_call_id,
+                                            name="execute_shell"
+                                        )]
+                        })
 
     try:
         proc = await asyncio.create_subprocess_shell(

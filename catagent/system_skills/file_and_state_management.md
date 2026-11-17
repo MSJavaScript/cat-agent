@@ -6,6 +6,12 @@ This skill explains the guidelines of file management and how to use `.md` file 
 - Router: Programmatically write a `readme.md` in the workdir of each step to remind StepNode of the task content.
 - StepNode: Maintain a `report.md` during execution. 
 
+|File | Purpose | Who write |
+|---|---|---|
+|state.md| Log the status of the whole workflow |Orchestrator |
+|readme.md| Remind StepNode the task content |Router|
+|report.md| Report of the step run | StepNode|
+
 Before StepNode starts to work, Orchestrator should copy all necessary files, e.g. output artifacts from previous steps, to the sub-workdir or create soft links. When a step is done, StepNode should write a summary section in `report.md` to summary this run and log error messages (if any).
 
 Keep all the `.md` files concise and formatted, make sure they are understandable to human and other agents.

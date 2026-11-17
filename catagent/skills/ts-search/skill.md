@@ -31,9 +31,9 @@ VASP has NEB and Dimer function by itself, but this skill may be not compatible 
 
 Follow the steps below to run a NEB calculation:
 
-1. Build IS and FS, their atomic indices should be matched.
+1. Build IS and FS, their atomic indices should be matched (use `build_ini_fin_structures_on_surface` tool, atomic indices are automatically matched, see "stepnode-tools" skill).
 2. Perform structure relaxation on IS and FS.
-3. Use `script/neb_make.py` to interpolate between relaxed IS and FS and get an initial guess of NEB path. 
+3. Use `script/neb_make.py` to interpolate between relaxed IS and FS and get an initial guess of NEB path (you can also use `build_nebpath_on_surface` tool, see "stepnode-tools" skill). 
     ```python
     python3 neb_make.py --ini POSCAR_ini --fin POSCAR_fin --nimages 5 # or --spacing 0.5
     ```
@@ -70,6 +70,8 @@ Follow the steps below to run a NEB calculation:
     write("result.extxyz", neb.images, format="extxyz")
     ```
     `run_ase_neb_with_dpa.py` in cat-mlff skill is a convenient script which runs neb by DPA force field. See the cat-mlff skill for more details.
+
+**PITFALLS**: The atomic indices in IS and FS must be matched, or the atoms will crowd together when make NEB interpolation. `build_ini_fin_structures_on_surface` tool in "structure_building_tools" collection and `bind_to_surface` tool in "reaction_system_tools" collection of StepNode can automatically match the indices, see "stepnode-tools" skill.
 
 ## Parameter setting of NEB
 
