@@ -272,7 +272,7 @@ def init_planner_tool(model:BaseChatModel):
                                           raw_plan.steps[i], 
                                           set(_depend_on), 
                                           set(_required_by))
-                
+            message += "If this is a fresh run, call `pause_to_ask` to let the user confirm this plan."
             return Command(update={
                 "messages": [ToolMessage(content=message, 
                                          tool_call_id=runtime.tool_call_id,
@@ -417,6 +417,7 @@ def init_planner_tool(model:BaseChatModel):
             for key in step_ids_will_be_deleted:
                 update[key] = None 
 
+            message += "If this is a fresh run, call `pause_to_ask` to let the user confirm this plan."
             return Command(
                 update={
                     "messages": [ToolMessage(content=message, 

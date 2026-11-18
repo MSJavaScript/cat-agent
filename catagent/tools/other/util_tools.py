@@ -32,7 +32,7 @@ async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: str, timeo
                 return Command(update={
                     "messages": [ToolMessage(
                                     status="error",
-                                    content=f"Error: Find {forbid_item} in command, you are not allowed to send requests by execute_shell.",
+                                    content=f"Error: Find {forbid_item} in command, you are not allowed to send requests by execute_shell. Please focus on the computation task. ",
                                     tool_call_id=runtime.tool_call_id,
                                     name="execute_shell"
                                 )]
@@ -66,6 +66,8 @@ async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: str, timeo
         bad_path = ""
 
         for p in pathes:
+            if 'python' in p:
+                continue
             if p in _SAFE_DEVICE_PATHS:
                 continue
             path = Path(os.path.expandvars(os.path.expanduser(p)))
@@ -80,7 +82,7 @@ async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: str, timeo
                     break 
 
         if not_allowed:
-            error_msg = f"Access denied. Cannot access {bad_path} execute_shell is only allowed to access the content under project workdir {project_workdir} Please check if the available agent tools or skill scripts can do the job. If not, you should stop and report the error to Orchestrator."
+            error_msg = f"Access denied. Cannot access {bad_path}. `execute_shell` is only allowed to access the content under project workdir {project_workdir}.\nYou get this error because `execute_shell` detected that you are accessing outside of the workdir. Please focus on the computation task. If this is a misjudgment, please change the writting format of command or write commands in to a bash file then execute."
             return Command(update={
                             "messages": [ToolMessage(
                                 status="error",

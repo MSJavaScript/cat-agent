@@ -91,18 +91,29 @@ async def orchestrator_request_queue(state:WorkflowState,
 
     if send_key is None:
         dead_steps = []
+        # True when at least one non-terminal step is legitimately waiting:
+        # pending/dependency-blocked, or running with a live owner.
+        #
+        # Do not return early on the first waiting step: a dead `running` step
+        # must still be reported even when a sibling is pending.  The old loop
+        # returned END as soon as it saw the pending sibling, hiding the dead
+        # step forever (the graph produced no interrupt and no result, so the
+        # request queue never moved again).
+        waiting = False
         for key in steps.keys(): 
             step = steps[key]
             if step.status in ['done', 'deleted']: # pending, running, done, deleted
                 continue
             if step.status != "running":
                 # pending / dependency-blocked: the router still owns it.
-                return Command(goto=END)
+                waiting = True
+                continue
             if not thread_id:
                 # No thread id means the registry cannot be consulted (direct
                 # callers, tests).  Preserve the old "wait" behaviour instead
                 # of declaring every running step dead.
-                return Command(goto=END)
+                waiting = True
+                continue
             # `status == "running"` is only an intent written by the router; it
             # survives a crash, a cancellation and a process restart.  Consult
             # the in-process run registry (see workflow/liveness.py) to decide
@@ -110,7 +121,8 @@ async def orchestrator_request_queue(state:WorkflowState,
             # `scheduled`, `running`, `finished` and `paused` are all "wait";
             # only `dead` means the queue would wait forever.
             if step_run_phase(thread_id, key) != DEAD:
-                return Command(goto=END)
+                waiting = True
+                continue
             dead_steps.append(key)
 
         if dead_steps:
@@ -134,6 +146,9 @@ async def orchestrator_request_queue(state:WorkflowState,
                     ) for key in dead_steps
                 }
             })
+
+        if waiting:
+            return Command(goto=END)
 
         replanning_prompt = "Replanning requests from Router:\nAll the steps finished (done or deleted). Determine if further actions are need. If not, summary this run and set `finalization = True`. "
 
@@ -384,7 +399,7 @@ async def router(state:WorkflowState, config:RunnableConfig):
             mark_step_scheduled(thread_id, key)
 
             # 写入readme.md 
-            write_readme(steps[key].workdir, steps[key])
+            write_readme(steps[key].workdir, steps[key], state["project_workdir"])
             message_for_stepnode = f"Complete this step. Read `readme.md` in workdir to get the task content.\nWorkdir: {steps[key].workdir}\nCall `get_tool_collection_infos` to get the descriptions of all the tool collections. Call `load_tool_collection` to load the tools.\nPrefer to use the tools in collections and scripts provided by skill (firstly use -h option to learn the usage, do not read them).\nWhen task completes, write a summary section in `report.md` to summarize this run and error messages (if any)."
             if steps_view[key]["n_times"] > 1:
                 message_for_stepnode = f"Retry {steps_view[key]["n_times"] - 1}." + message_for_stepnode
@@ -483,28 +498,42 @@ async def router(state:WorkflowState, config:RunnableConfig):
 
 
 
-def write_readme(workdir_path:str, step:Step):
+def write_readme(workdir_path:str, 
+                 step:Step,
+                 project_workdir:str):
     readme_path = os.path.join(workdir_path, "readme.md")
     with open(readme_path, mode="w") as f:
         f.write(f"# readme: {step.step_id}\n\n")
 
-        f.write(f"## Content\n")
-        f.write(f"{step.content}\n\n")
+        msg = "Maintain a report.md during execution. When the run completes, add a Summary section in report.md."
+        f.write("## Content\n")
+        f.write(f"{step.content}\n{msg}\n\n")
 
-        f.write(f"## Solution\n")
+        f.write("## Solution\n")
         f.write(f"{step.solution}\n\n")
 
-        f.write(f"## Related skills\n")
+        f.write("## Related skills\n")
         f.write(f"{step.related_skills}\n\n")
 
-        f.write(f"## Required Artifacts\n")
-        f.write(f"|file name or wildcard|purpose|\n|---|---|\n")
+        f.write("## Required Artifacts\n")
+        f.write("|file name or wildcard|purpose|\n|---|---|\n")
         for req_art in step.required_artifacts.keys():
             f.write(f"|{req_art}|{step.required_artifacts[req_art]}|\n")
 
-        f.write(f"## Output Artifacts\n")
-        f.write(f"|file name or wildcard|purpose|\n|---|---|\n")
+        f.write("## Output Artifacts\n")
+        f.write("|file name or wildcard|purpose|\n|---|---|\n")
         for req_art in step.output_artifacts.keys():
             f.write(f"|{req_art}|{step.output_artifacts[req_art]}|\n")
 
+        f.write('\n')
+        rules = ["You should only focus on computation task, please following the following rules:"
+                 f"- Please only work in workdir {step.workdir}.",
+                 f"- If you need to submit a job, firstly write a run.sh and job_description.json",
+                 f"- You can only access files in project workdir {project_workdir} and files of provided skills. Do not access other dirs or files."
+                 f"- Do not try to debug any repo. Focus the scientific problem and computation task.",
+                 f"- Leave the job submission and downloading to Jobmanager, you should not care about them.",
+                 f"- Do not use curl, wget or git etc. Do not install anything by yourself. If you really need, call `pause_to_ask` to ask user for help."]
+        f.write("## Rules\n")
+        for line in rules:
+            f.write(f"{line}\n")
         f.write("\n") 

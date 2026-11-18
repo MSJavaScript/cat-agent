@@ -3,7 +3,7 @@ from langgraph.types import Command
 from langchain.tools import tool, ToolRuntime
 from langchain.messages import ToolMessage
 from langgraph.prebuilt import ToolNode
-from langchain_core.tools.base import BaseTool
+from langchain_core.tools.base import BaseTool, InjectedToolArg
 from langchain.agents.middleware import ToolCallRequest
 from langgraph.errors import GraphBubbleUp
 
@@ -15,8 +15,8 @@ from catagent.workflow.skill_tool import get_skill_content, get_skill_summaries
 from catagent.tools.neb.reaction_system import ReactionSystemToolSets
 from catagent.tools.other.util_tools import execute_shell, edit_file, read_file
 from .models import ToolNamespace, AgentInterrupt, JobSubmission, AskForArgs, StepNodeContext
-from typing import List,  Dict,  Any, Literal, Optional, Tuple
-import httpx, logging, uuid 
+from typing import List,  Dict,  Any, Literal, Optional, Tuple, Annotated
+import httpx, logging, uuid, os
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,8 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
                          local_dir: str, 
                          provider_name: str,
                          job_env_name: str,
-                         result_patterns: Optional[List[str]] = None) -> Tuple[bool, Any]:
+                         result_patterns: Optional[List[str]] = None,
+                         job_uuid: Annotated[Optional[str], InjectedToolArg] = None) -> Tuple[bool, Any]:
         '''
         Submit a job to job manager.
         Args:
@@ -56,7 +57,16 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
             job_env_name: The name of selected job environment.
             result_patterns: The file name or wildcard of the result to be recycled. Download all the calculation results by default.
         '''
-        job_uuid = str(uuid.uuid4())
+        if not os.path.isfile(os.path.join(local_dir, "run.sh")):
+            return (False, f"Error: run.sh does not exist in {local_dir}.")
+        if not os.path.isfile(os.path.join(local_dir, "job_description.json")):
+            return (False, f"Error: job_description.json does not exist in {local_dir}.")
+        # `job_uuid` is injected by `tool_call_wrapper`, not by the model.  It is
+        # derived from (inner thread id, tool_call_id), which are both stable
+        # when LangGraph replays a checkpoint.  A replay therefore addresses the
+        # *same* jobmanager row instead of creating a second remote job.
+        # The uuid4 fallback only applies to direct callers (tests / manual use).
+        job_uuid = job_uuid or str(uuid.uuid4())
         payload = {
             "job_uuid":job_uuid ,
             "description": job_description,
@@ -285,7 +295,28 @@ async def tool_call_wrapper(request:ToolCallRequest, handler):
                                 tool_call_id=req.tool_call["id"],
                                 name=tool_name)]
             })
-        flag, out = await submit_tool.ainvoke(input=req.tool_call.get("args") or {})
+        # Idempotent job id.
+        #
+        # A resumed/replayed StepNode re-executes the *same* tool call: the
+        # checkpoint still contains the AIMessage that produced this
+        # `tool_call_id`.  Including the inner thread id + tool_call_id in the
+        # uuid makes every replay compute the same job_uuid, so the jobmanager's
+        # existing "job_uuid already exists" check collapses the duplicate.  A
+        # genuine retry is a new model turn and therefore gets a new
+        # `tool_call_id` (and a new job).
+        runtime = getattr(req, "runtime", None)
+        runtime_config = getattr(runtime, "config", None) or {}
+        inner_thread_id = (runtime_config.get("configurable") or {}).get("thread_id", "")
+        tool_call_id = req.tool_call.get("id") or ""
+        job_uuid = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"catagent:{inner_thread_id}:{tool_call_id}",
+            )
+        )
+        submit_args = dict(req.tool_call.get("args") or {})
+        submit_args["job_uuid"] = job_uuid
+        flag, out = await submit_tool.ainvoke(input=submit_args)
         if flag: # out is a dict, payload
             obj = JobSubmission(pending=True,
                             message=f"Job {out['job_uuid']} is submitted, metadata:\n{out}",

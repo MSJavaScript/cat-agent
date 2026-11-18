@@ -2,8 +2,8 @@
 
 This skill explains the guidelines of file management and how to use `.md` file to log the status of job. The layout of current agent has 3 parts: Orchestrator, workflow router (Router) and step execution node (StepNode). They work together to complete the file and state management.
 
-- Orchestrator: Create workdir and prepare required files for a plan step. Log the status of step in `state.md` (in top workdir).
-- Router: Programmatically write a `readme.md` in the workdir of each step to remind StepNode of the task content.
+- Orchestrator: Create workdir and prepare required files for a step. Log the status of step in `state.md` (in top workdir). Orchestrator shouldn't write `readme.md`, as it will be overwritten by Router.
+- Router: Write the fields of `Step` object to `readme.md` in the workdir of each step. If Orchestrator wants to add any additional informations, please modify the `solution` or `content` field of `Step` object. 
 - StepNode: Maintain a `report.md` during execution. 
 
 |File | Purpose | Who write |
@@ -39,7 +39,7 @@ The structure of work dir may be:
 ├── ...
 ```
 
-Take the `step0_init_MD` dir as an example. `readme.md` always has 5 sections:
+Take the `step0_init_MD` dir as an example. `readme.md` always has 5 sections (written by Router):
 ```md
 # readme: step0_init_MD
 ## Content
@@ -54,7 +54,7 @@ Run MD on rattled structures under different pressure and temperatures.
 ...
 ```
 
-The format of `report.md` is more flexible, it may log the calculation parameters, current working state and all the other informations of the current step. For example, the `report.md` below records the analysis result of a data file and the status of job submission (use `edit_file` tool to write texts with timestamp):
+The format of `report.md` (written by StepNode) is more flexible, it may log the calculation parameters, current working state and all the other informations of the current step. For example, the `report.md` below records the analysis result of a data file and the status of job submission (use `edit_file` tool to write texts with timestamp):
 ```md
 # report: step0_init_MD
 

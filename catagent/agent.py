@@ -261,6 +261,25 @@ def create_catagent(model:BaseChatModel,
             interrupts = (interrupts,)
         return list(interrupts)
 
+    def _stepnode_interrupt_sends(collected_interrupts:dict,
+                                  step_id:str,
+                                  state:dict,
+                                  project_workdir:str) -> list:
+        """Build one outer ``interrupt_node`` Send per pending inner interrupt.
+
+        The inner StepNode emits an ``__interrupt__`` for every entry in its
+        ``interrupts`` channel, and each one needs its own outer interrupt so
+        the answers can be routed back by inner interrupt id.
+        """
+        return [Send("interrupt_node", arg={
+            "source": "stepnode",
+            "step_id": step_id,
+            "workdir": state.get("workdir", ""),
+            "project_workdir": project_workdir,
+            "interrupt_ori_id": key,
+            "interrupt_payload": collected_interrupts[key],
+        }) for key in collected_interrupts.keys()]
+
     async def step_node(state:StepNodeInput,
                         config:RunnableConfig,
                         runtime: Optional[Runtime[WorkflowContext]] = None):
@@ -290,6 +309,46 @@ def create_catagent(model:BaseChatModel,
 
         try:
             interrupt_resume = state.get("interrupt_resume") or {}
+
+            # Recovery for an interrupted hand-off.
+            #
+            # This node has to do two things that are not atomic: run the inner
+            # StepNode graph, and return a Command that makes the *outer* graph
+            # emit the interrupt.  If this coroutine is cancelled between the
+            # inner emit and the `return` below (see the CancelledError comment),
+            # `collected_interrupts` (a local variable) is lost, but the inner
+            # checkpoint keeps the pending interrupt forever.
+            #
+            # On a re-run of this node (no resume argument) we therefore look at
+            # the inner thread first.  If it is paused on an interrupt, forward
+            # those interrupts instead of starting the step again.  That turns
+            # the orphaned inner state back into a jobmanager registration and a
+            # visible outer interrupt.
+            if not interrupt_resume:
+                try:
+                    inner_state = await stepnode_agent.aget_state(
+                        config=step_node_config
+                    )
+                    recovered_interrupts = {
+                        str(interrupt_obj.id): interrupt_obj.value
+                        for task in (getattr(inner_state, "tasks", None) or ())
+                        for interrupt_obj in (getattr(task, "interrupts", None) or ())
+                    }
+                except Exception:
+                    # A brand-new inner thread has no checkpoint yet, and test
+                    # doubles may not implement state access.
+                    recovered_interrupts = {}
+                if recovered_interrupts:
+                    logger.warning(
+                        "step_node %s: re-surfacing %d pending inner "
+                        "interrupt(s) left by an earlier cancelled hand-off.",
+                        step_id, len(recovered_interrupts),
+                    )
+                    mark_step_finished(thread_id, step_id)
+                    return Command(goto=_stepnode_interrupt_sends(
+                        recovered_interrupts, step_id, state, project_workdir
+                    ))
+
             if interrupt_resume: # 中断后接着运行
                 payloads = stepnode_agent.astream(input = Command(resume=interrupt_resume),
                                                   config = step_node_config,
@@ -323,14 +382,15 @@ def create_catagent(model:BaseChatModel,
 
             # 这里收集的中断可能是很多个提交作业的中断
             if collected_interrupts:
-                send_list = [Send("interrupt_node", arg={
-                    "source": "stepnode",
-                    "step_id": step_id,
-                    "workdir": state.get("workdir", ""),
-                    "project_workdir": project_workdir,
-                    "interrupt_ori_id": key,
-                    "interrupt_payload": collected_interrupts[key]
-                }) for key in collected_interrupts.keys()]
+                # NOTE: this is the non-atomic part.  `collected_interrupts`
+                # lives only in this coroutine; it is not in either graph state
+                # until the Command below is returned and LangGraph persists it.
+                # If cancellation arrives before that return, the recovery block
+                # at the top of this function re-reads the inner checkpoints and
+                # builds the same Sends on the next run.
+                send_list = _stepnode_interrupt_sends(
+                    collected_interrupts, step_id, state, project_workdir
+                )
                 command = Command(goto=send_list)
             else:
                 stepnode_state = await stepnode_agent.aget_state(config=step_node_config)
@@ -346,8 +406,30 @@ def create_catagent(model:BaseChatModel,
                 command = Command(goto="router",
                                   update={ "step_results": {step_id: step_result} })
         except asyncio.CancelledError:
-            # A cancelled run (shutdown, client disconnect) must not look like
-            # a live StepNode after the event loop comes back.
+            # Who cancels this coroutine?
+            #
+            # It is the asyncio task cancellation of the graph run, not the
+            # jobmanager "posting a result".  A callback post is an ordinary
+            # HTTP request; it cancels nothing by itself.  What used to happen
+            # is indirect:
+            #
+            #   jobmanager POST /chat  ->  SSE response held open for the whole
+            #   StepNode turn  ->  httpx read timeout after 30 s  ->  the client
+            #   closes the connection  ->  the ASGI server cancels the request
+            #   task  ->  this `astream` raises CancelledError here.
+            #
+            # A retry then started a second run on the same checkpoint while
+            # this one was still unwinding, which forked the thread.
+            #
+            # The real fix is upstream: job results are now ACKed with 202 and
+            # executed as a detached task (see
+            # `catagent/app/service.py::_accept_job_result`), and
+            # `_stream_chat` serializes runs per thread.  This handler is still
+            # needed for an SSE client that disconnects or for server shutdown.
+            #
+            # Do not swallow the exception: LangGraph must see the cancellation.
+            # The pending inner interrupt is preserved in its checkpoint and is
+            # re-surfaced by the recovery block above on the next run.
             clear_step_run(thread_id, step_id)
             raise
         except GraphBubbleUp:
@@ -388,6 +470,21 @@ def create_catagent(model:BaseChatModel,
 
         length = len(last_message)
         logger.info(f"Enter orchestrator_node. last messages = {last_message[:250] if length > 250 else last_message}\ninterrupt_resume = {state.get('interrupt_resume')}")
+
+        # Why the same "Correction request" can be logged many times:
+        #
+        # This node is dispatched as a pending ``Send`` from the request queue.
+        # If the outer run is cancelled before the node returns, the checkpoint
+        # still points at that Send.  The next request re-enters this function
+        # with ``interrupt_resume = None`` and the same ``messages[-1]``, and
+        # the code below invokes the inner orchestrator with that message again
+        # (a checkpointed graph treats new input as a new turn).  Overlapping
+        # requests under the old 30 s jobmanager callback ACK repeated this 11
+        # times for one persisted correction.
+        #
+        # Do not "fix" this by dropping repeated messages.  The run lock and the
+        # stale-resume guard in ``app/streaming.py`` prevent the duplicated and
+        # overlapping requests that cause the re-execution in the first place.
 
         writer = get_stream_writer()
         # 这里假设它必须提供thread_id
@@ -484,6 +581,12 @@ def create_catagent(model:BaseChatModel,
                            })
 
     def interrupt_node(state:InterruptNodeInput, config:RunnableConfig):
+        # NOTE: the two log lines below appear twice for one interrupt.
+        # LangGraph re-executes a node from the top when its ``interrupt()`` is
+        # answered: the first pass suspends, the second pass calls this function
+        # again and prints the same "Enter interrupt_node" / "JobSubmission
+        # interrupt" lines before ``interrupt()`` returns the answer.  The
+        # second occurrence is a resume, not a second job submission.
         logger.info(f"Enter interrupt_node. source = {state['source']}, step_id = {state['step_id']}.")
         thread_id = config["configurable"]["thread_id"]
         if state['interrupt_payload']["kind"] == "JobSubmission":

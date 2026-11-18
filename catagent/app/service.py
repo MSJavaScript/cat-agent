@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from langchain.messages import HumanMessage
 from langgraph.types import Command
 
@@ -19,6 +20,8 @@ from .events import JOBMANAGER_SOURCE, DebugEventLog
 from .models import ChatRequest
 from .plan import get_plan
 from .streaming import _stream_chat
+
+logger = logging.getLogger("catagent")
 
 _DEBUG_UI_HTML = (Path(__file__).with_name("debug_ui.html")).read_text(
     encoding="utf-8"
@@ -81,6 +84,23 @@ def _resume_from_request(
     if interrupt_id:
         return thread_id, Command(resume={interrupt_id: response})
     return thread_id, Command(resume=response)
+
+
+def _expected_resume_id(req: ChatRequest) -> str | None:
+    """Return the outer interrupt id a resume request is answering.
+
+    The HTTP UI sends it at the top level; other clients nest it inside
+    ``interrupt_resume``.  Returning ``None`` means "cannot tell" and disables
+    the staleness guard.
+    """
+    if req.interrupt_id:
+        return req.interrupt_id
+    resume_request = req.interrupt_resume
+    if isinstance(resume_request, dict):
+        interrupt_id = resume_request.get("interrupt_id")
+        if isinstance(interrupt_id, str) and interrupt_id:
+            return interrupt_id
+    return None
 
 
 def _resolve_workdir(workdir: str | None) -> str | None:
@@ -152,6 +172,15 @@ async def build_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
+        # Detached job-result runs are not tied to an HTTP connection, so stop
+        # them explicitly before closing the checkpoint DB / HTTP client.
+        for task in list(app.state.run_tasks):
+            task.cancel()
+        for task in list(app.state.run_tasks):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         await httpx_client.aclose()
         await db_conn.close()
 
@@ -171,6 +200,103 @@ async def build_app(
     # Every payload is also appended here so the debug UI can follow turns it
     # did not initiate itself (notably jobmanager callback resumes).
     app.state.event_log = DebugEventLog()
+    # Job results are executed as detached tasks.  Keeping the task objects
+    # alive prevents the event loop from garbage-collecting them mid-run and
+    # lets shutdown cancel them cleanly.
+    app.state.run_tasks: set[asyncio.Task] = set()
+
+    def _spawn_run(coro) -> asyncio.Task:
+        """Run one graph turn without tying its lifetime to an HTTP request."""
+        task = asyncio.create_task(coro)
+        app.state.run_tasks.add(task)
+
+        def _done(finished: asyncio.Task) -> None:
+            app.state.run_tasks.discard(finished)
+            if finished.cancelled():
+                return
+            exc = finished.exception()
+            if exc is not None:
+                logger.error("Detached graph run failed: %s", exc, exc_info=exc)
+
+        task.add_done_callback(_done)
+        return task
+
+    async def _run_detached(
+        thread_id: str,
+        agent_input: Any,
+        workdir: str | None,
+        register_jobs: bool = True,
+        expected_interrupt_id: str | None = None,
+    ) -> None:
+        """Consume a graph run and publish its payloads to the event log.
+
+        This is the important difference from the old callback path: the graph
+        run is *not* owned by the jobmanager's HTTP request.  Closing that
+        request (a read timeout, a retry, a restart) can no longer cancel the
+        StepNode/orchestrator task and drop the interrupts it collected.
+        """
+        try:
+            async for payload in _stream_chat(
+                catagent=catagent,
+                agent_input=agent_input,
+                thread_id=thread_id,
+                job_manager_url=job_manager_url,
+                http_client=httpx_client,
+                register_jobs=register_jobs,
+                recursion_limit=app.state.recursion_limit,
+                project_workdir=workdir,
+                expected_interrupt_id=expected_interrupt_id,
+            ):
+                app.state.event_log.append(thread_id, payload)
+        except asyncio.CancelledError:
+            # Only server shutdown cancels this task now; the jobmanager has
+            # already received its ACK and is not waiting for the body.
+            logger.info("Detached graph run cancelled: thread=%s", thread_id)
+            raise
+        except Exception as exc:
+            logger.exception("Detached graph run failed: thread=%s", thread_id)
+            app.state.event_log.append(
+                thread_id,
+                {
+                    "type": "custom",
+                    "message": f"{type(exc).__name__}: {exc}",
+                    "message_id": str(uuid.uuid4()),
+                    "thread_id": thread_id,
+                },
+            )
+
+    async def _accept_job_result(req: ChatRequest) -> JSONResponse:
+        """Accept a JobResult and schedule the resume, then return immediately.
+
+        Jobmanager's callback is a control-plane message, not a stream the
+        caller needs to read.  Holding an SSE response open for a multi-minute
+        StepNode turn is what caused the 30 s ``ReadTimeout`` churn and the
+        overlapping retries.  A 202 ACK lets it mark the callback delivered
+        while the graph continues in the background.
+        """
+        last_thread_id = app.state.last_thread_id
+        workdir = _resolve_workdir(req.workdir)
+        thread_id, agent_input = _resume_from_request(req, last_thread_id)
+        app.state.last_thread_id = thread_id
+        _spawn_run(
+            _run_detached(
+                thread_id=thread_id,
+                agent_input=agent_input,
+                workdir=workdir,
+                register_jobs=req.register_jobs,
+                expected_interrupt_id=req.interrupt_id,
+            )
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "accepted": True,
+                "thread_id": thread_id,
+                "interrupt_id": req.interrupt_id,
+                "job_uuid": req.job_uuid,
+            },
+        )
 
     @app.get("/", response_class=HTMLResponse)
     async def debug_ui():
@@ -215,17 +341,37 @@ async def build_app(
         return {"ok": True, "seq": event["seq"]}
 
     # jobmanager posts its JobResult directly to `callback_url`; accepting it
-    # on "/" as well as "/chat" means no extra proxy is required.
+    # on "/" and "/chat" as well as "/job-result" means no extra proxy or
+    # config change is required.
+    #
+    # A JobResult is detected by its `job_uuid`: an ordinary chat/resume never
+    # sets that field.  Such a request is ACKed with 202 and the graph resume
+    # runs as a detached task, so the jobmanager never holds an SSE connection
+    # open for the whole StepNode turn.
+    @app.post("/job-result")
     @app.post("/chat")
     @app.post("/")
     async def chat(req: ChatRequest):
+        if req.job_uuid is not None:
+            return await _accept_job_result(req)
+
         last_thread_id = app.state.last_thread_id
         workdir = _resolve_workdir(req.workdir)
 
         if req.interrupt_id is not None or req.interrupt_resume is not None:
             thread_id, agent_input = _resume_from_request(req, last_thread_id)
+            # Apply the same stale-answer guard to *every* resume, not only to
+            # jobmanager callbacks.  A double-clicked button, a browser retry,
+            # or an old client resending an already-consumed interrupt id makes
+            # LangGraph re-run the task that is currently at the head of the
+            # checkpoint (it does not turn into a no-op).  That is exactly how
+            # one persisted "Correction request from Router" was executed 11
+            # times in logger.txt: the retries carried an interrupt id that had
+            # already been consumed, so the pending orchestrator task ran again.
+            expected_interrupt_id = _expected_resume_id(req)
         else:
             thread_id, agent_input = _normal_input(req, workdir)
+            expected_interrupt_id = None
 
         app.state.last_thread_id = thread_id
 
@@ -240,10 +386,20 @@ async def build_app(
                     register_jobs=req.register_jobs,
                     recursion_limit=app.state.recursion_limit,
                     project_workdir=workdir,
+                    expected_interrupt_id=expected_interrupt_id,
                 ):
                     app.state.event_log.append(thread_id, payload)
                     yield _sse(payload)
             except asyncio.CancelledError:
+                # The ASGI server cancels this generator when the HTTP client
+                # disconnects (the old jobmanager path hit this after its 30 s
+                # read timeout).  Re-raise so Starlette closes the task; the
+                # per-thread lock in `_stream_chat` is released by its
+                # `async with`.  Job callbacks no longer go through this path.
+                logger.info(
+                    "SSE client disconnected; graph run cancelled: thread=%s",
+                    thread_id,
+                )
                 raise
             except Exception as exc:
                 payload = {

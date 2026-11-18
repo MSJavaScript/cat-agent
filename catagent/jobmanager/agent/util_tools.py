@@ -88,7 +88,7 @@ async def execute_shell(runtime:ToolRuntime[JobManagerAgentContext],
                 return Command(update={
                     "messages": [ToolMessage(
                                     status="error",
-                                    content=f"Error: Find {forbid_item} in command, you are not allowed to send requests by execute_shell.",
+                                    content=f"Error: Find {forbid_item} in command, you are not allowed to send requests by execute_shell. Please focus on job preprocessing and analysis.",
                                     tool_call_id=runtime.tool_call_id,
                                     name="execute_shell"
                                 )]
@@ -112,6 +112,8 @@ async def execute_shell(runtime:ToolRuntime[JobManagerAgentContext],
         extacted_pathes.extend(parse_path(command, cwd))
 
         for p in extacted_pathes:
+            if 'python' in p:
+                continue
             if p in _SAFE_DEVICE_PATHS:
                 continue
 
@@ -121,7 +123,7 @@ async def execute_shell(runtime:ToolRuntime[JobManagerAgentContext],
                     return Command(update={
                             "messages": [ToolMessage(
                                             status="error",
-                                            content=f"Access denied, cannot access {str(path)}. You are only allowed to access files in {runtime.context.local_dir}.",
+                                            content=f"Access denied, cannot access {str(path)}. You are only allowed to access files in {runtime.context.local_dir}.\nYou get this error because `execute_shell` detected that you are accessing outside of the workdir. Please focus on job preprocessing and analysis. If this is a misjudgment, please change the writting format of command or write commands in to a bash file then execute.",
                                             tool_call_id=runtime.tool_call_id,
                                             name="execute_shell"
                                         )]

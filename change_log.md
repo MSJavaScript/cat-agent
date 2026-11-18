@@ -406,3 +406,238 @@ The duplicate-tool-response defect is fixed. The intermittent
 occasionally in finalization; the existing 3-attempt retry recovers it. Dumps
 are still written to
 `$TMPDIR/catagent_stepnode_llm_error_<time_ns>_<pid>.json` for diagnostics.
+
+---
+
+## 2026-11-18 — Stop duplicate StepNode runs, duplicate jobs and repeated corrections
+
+### Symptoms
+
+1. One router dispatch of `plan-0:step-4` produced **three** `sp_bent_CO2`
+   jobs (`1258d170…`, `d84a55ec…`, `c7bab52d…`) and **five** `step_node`
+   executions.
+2. Two of those jobs were never surfaced to the outer stream: no
+   `__interrupt__` write and no `set-thread-id` registration. The inner thread
+   forked (5 heads / 4 forks) while the outer thread had 1 head / 0 forks.
+3. `logger.txt` shows `orchestrator_node` entered at 06:36:18, 06:37:33,
+   06:39:03, … 06:45:12 with the **same**
+   `last messages = Correction request from Router`. Between outer checkpoints
+   `step 29` (06:36:18, request `1b2ead5a` already `sent=True`) and `step 30`
+   (06:45:38) **no outer checkpoint was written at all**, yet the node was
+   entered 11 times. The router therefore did **not** re-dispatch the request;
+   the *same* pending `Send("orchestrator_node")` task was re-run by overlapping
+   `/chat` requests.
+
+### Root cause
+
+`step_node` is a *host* around the inner StepNode graph, not the step itself.
+Every JobSubmission resume re-enters it through
+`interrupt_node → Send("step_node", …)`, so the count is
+`1 initial dispatch + 1 per job resume`. That part is expected.
+
+The bug was that the jobmanager's callback used the streaming `POST /chat` as
+its acknowledgement. `JobManager.client` has a 30 s read timeout
+(`catagent/jobmanager/manager.py`), while a StepNode turn takes minutes. The
+read timed out, the manager retried, and the retry started another graph run on
+the **same thread** while the first run was still unwinding. Consequences:
+
+- Both runs resumed the same inner checkpoint, creating a fork. Each replay
+  could reach the model's `submit_job` tool call.
+- `submit_job` minted a fresh `uuid.uuid4()` on every replay, so the
+  jobmanager's per-`job_uuid` idempotence could not collapse them.
+- `step_node` collects interrupts in a **local** dict and only returns the
+  outer `Send` list after the `astream` loop. A run cancelled before that
+  return lost its `collected_interrupts`; the inner checkpoint kept the
+  pending job, but the outer graph never emitted it and
+  `_register_job_submission` was never called. Those are the orphan jobs.
+- A retry that carried an already-consumed interrupt id re-entered whatever
+  pending node was at the head of the checkpoint. For the logger trace that was
+  the correction `Send`, which is why the same "Correction request from Router"
+  appeared repeatedly. It was **one** persisted correction, re-executed by
+  overlapping requests — not the router generating it again.
+
+### What changed
+
+#### `catagent/app/streaming.py`
+
+- Added a process-local `thread_run_lock(thread_id)` registry and wrapped the
+  whole `_stream_chat` graph run in it. `/chat`, the detached job-result runner
+  and the debug CLI all go through `_stream_chat`, so they now share the same
+  per-thread serialization. Two requests for one thread can no longer fork the
+  checkpoint.
+- Added `expected_interrupt_id` and `_pending_interrupt_ids()`. A job callback
+  is skipped when its outer interrupt id is **not** among the thread's pending
+  interrupts. This makes at-least-once callback delivery safe: a duplicate
+  callback cannot replay an old resume and re-enter a pending node. If the
+  state cannot be inspected, the resume is **not** skipped (dropping a real
+  result is worse than replaying one).
+
+#### `catagent/app/service.py`
+
+- Added `POST /job-result` and made `POST /` and `POST /chat` recognise a
+  JobResult by its `job_uuid` field.
+- A JobResult is now ACKed with **HTTP 202 immediately**, then executed by a
+  detached `asyncio.Task` (`_run_detached`). The jobmanager no longer holds an
+  SSE connection open for the StepNode turn, so a read timeout/retry can no
+  longer cancel the graph. `run_tasks` is cancelled on application shutdown.
+- Added comments explaining the `CancelledError` path: the ASGI server cancels
+  the SSE generator when the **HTTP client disconnects** (the old 30 s
+  timeout), not when the jobmanager "posts a result".
+- The duplicate-resume guard is passed through as `expected_interrupt_id`.
+- `_expected_resume_id()` now supplies that guard for **every** resume, not
+  only jobmanager callbacks. A double-clicked UI button, a browser retry, or
+  any client resending an already-consumed `interrupt_id` is now treated as
+  stale and does not start a graph run. This closes the remaining way to
+  reproduce the repeated correction: LangGraph does not ignore a resume for an
+  interrupt that is already gone, it re-runs the task at the checkpoint head.
+  The UI's top-level `interrupt_id` and the nested
+  `interrupt_resume.interrupt_id` shape are both recognised.
+
+#### `catagent/jobmanager/manager.py`
+
+- Documented that the callback is a control-plane request which is now ACKed
+  with 202 before the graph runs, and that any 2xx (including 202) means
+  "delivered". The URL is unchanged so existing `callback_url` configuration
+  and the test callback server keep working.
+- The callback log now includes the HTTP status.
+
+#### `catagent/stepnode/init_tools.py`
+
+- `submit_job` accepts an injected `job_uuid` argument
+  (`Annotated[Optional[str], InjectedToolArg]`); it is hidden from the model's
+  tool schema. The `uuid.uuid4()` fallback is only for direct test/manual
+  calls.
+- `tool_call_wrapper` derives the id as
+  `uuid5(NAMESPACE_URL, "catagent:{inner_thread_id}:{tool_call_id}")`.
+  A checkpoint replay re-issues the same `tool_call_id`, so it computes the
+  same `job_uuid` and hits the jobmanager's existing-job branch. A genuine
+  retry is a new model turn and gets a new id, so it can still submit a new job.
+
+#### `catagent/agent.py`
+
+- Extracted `_stepnode_interrupt_sends()` so both the normal path and the
+  recovery path build identical outer `Send`s.
+- Added a recovery pre-scan at the start of `step_node`: when there is no
+  resume argument and the inner thread is paused on interrupts, those
+  interrupts are forwarded to the outer `interrupt_node` instead of starting
+  the step again. This re-surfaces an interrupt that was orphaned by a
+  cancelled hand-off.
+- Expanded the comments around `except asyncio.CancelledError` and around the
+  non-atomic `collected_interrupts` hand-off. The cancellation comes from the
+  ASGI request task being cancelled when the HTTP client disconnects (or from
+  server shutdown); the jobmanager's POST only triggers it indirectly by
+  closing the connection after its 30 s read timeout. With the 202 ACK and the
+  per-thread lock this path is now limited to SSE clients and shutdown.
+
+#### `catagent/workflow/router.py` — dead `running` step masked by a pending sibling
+
+This is a pre-existing stall, not part of the duplicate-run cause, but the
+first post-fix e2e run hit it and it has the same liveness root.
+
+`orchestrator_request_queue` used to `return Command(goto=END)` at the first
+non-terminal *waiting* step:
+
+```python
+for key in steps:
+    if step.status in ("done", "deleted"):
+        continue
+    if step.status != "running":
+        return Command(goto=END)      # pending sibling: stop scanning
+    if step_run_phase(thread_id, key) != DEAD:
+        return Command(goto=END)
+    dead_steps.append(key)
+```
+
+If a sibling was `pending` (or a live `running` step appeared first), the loop
+returned `END` before reaching the dead `running` step, so its crash was never
+reported. The graph then stopped with that step still `running`: no interrupt,
+no `StepResult`, and no further router pass — the workflow hung forever.
+
+The loop now scans every step, collecting `dead_steps`, and remembers
+`waiting = True` instead of returning early. After the scan:
+
+- any `dead_steps` → `Command(goto="router")` with an `error` `StepResult` per
+  dead step (the existing correction path);
+- otherwise `waiting` → `Command(goto=END)` as before.
+
+`waiting` covers pending/dependency-blocked steps, and `scheduled`, `running`,
+`finished` or `paused` runs. Steps without a `thread_id` also set `waiting`,
+because the registry cannot be consulted and guessing "dead" would be wrong.
+
+### The other repeated lines in `logger.txt`
+
+`logger.txt` contains three different kinds of repetition, and only two of
+them are bugs:
+
+1. **`interrupt_node` / `JobSubmission interrupt` twice** (05:42:15 and
+   06:23:46, and again at 06:46:40 / 06:47:46). LangGraph re-executes a node
+   from the top when its `interrupt()` is answered, so the second pair is the
+   *resume* of the same interrupt, not a second submission. This is normal.
+   A comment now says so in `agent.py::interrupt_node`; the lines were left
+   unchanged because changing them would hide a real second submission.
+2. **`step_node` three times with the identical `interrupt_resume` dict**
+   (06:23:46, 06:31:07, 06:33:09). This is the duplicate-resume bug: the same
+   job result was delivered again while the previous run was still unwinding.
+   The stale-resume guard now drops the repeats.
+3. **`orchestrator_node` 11 times with the identical correction message**
+   (06:36:18–06:45:12, with no router entry in between). One persisted
+   correction was re-executed by overlapping requests. Explained below.
+
+### Why the repeated "Correction request from Router" messages are gone
+
+The correction itself was persisted exactly once: the orchestrator thread had
+one `[89] HumanMessage: 'Correction request from Router: …'`. The repetition in
+`logger.txt` came from the pending `orchestrator_node` task being re-entered by
+overlapping `/chat` requests. Serializing runs per thread plus rejecting stale
+job resumes means the same correction is executed once. No message-deduplication
+hack was added because the duplication was real re-execution, not a UI replay.
+
+### Regression test
+
+Added `check/test_agent_concurrency.py`:
+
+- three concurrent `_stream_chat` runs on one thread execute one at a time
+  (`max_active == 1`) and all three still run;
+- a job result whose interrupt id is no longer pending does **not** start a
+  graph run, while a pending one does;
+- replaying the same `tool_call_id` posts the same `job_uuid`, and a different
+  tool call posts a different one;
+- a `POST /` JobResult is ACKed with **202**, the resume is scheduled with the
+  callback's interrupt id, and its payloads reach the event log;
+- a `POST /chat` resume carrying a stale `interrupt_id` does not run the graph,
+  while a resume carrying a pending one still does.
+
+Added one case to `check/test_agent_liveness.py`:
+
+- `dead step is not masked by pending sibling`: a dead `running` step plus a
+  `pending` sibling must still route to the router and produce an `error`
+  `StepResult` for the dead step only. This is the regression that stalled the
+  first post-fix e2e run.
+
+`check/README.md` now lists `test_agent_liveness.py` and
+`test_agent_concurrency.py` in its test table (the liveness file was missing
+before).
+
+### Verification
+
+- `python -m check.test_agent_concurrency` — **PASS**
+- `python -m check.test_debug_ui` — **PASS**
+- `python -m check.test_agent_stepnode` — **PASS**
+- `python -m check.test_agent_liveness` — **PASS**
+- `python -m check.test_app_skill_init` — **PASS**
+- `python -m check.test_jobmanager_recovery` — **PASS**
+- `python -m check.test_cli_jobs` — **PASS**
+- `python -m check.test_agent_state_sync` — **PASS**
+- `python -m check.test_agent_orchestrator` — **PASS**
+  (`orchestrator append plan test: OK`)
+- `python -m check.test_agent_e2e` — **PASS**
+  (`END-TO-END TEST: OK`, workdir `check/.tmp/e2e_48c694e5`).
+
+The first post-fix e2e attempt stalled on the dead-step/pending-sibling
+masking bug (fixed above). The second attempt got through planning, preparation
+and both job submissions, but one jobmanager `checking` LLM call did not return
+within the test's default 180 s callback wait; its DB row stayed in
+`finalize_state='finalizing'`. Rerunning with `--timeout 600` passed. That hang
+is a separate pre-existing jobmanager timeout/robustness issue (the
+`run_job_agent(phase="checking")` call has no timeout of its own); it is not the
+duplicate-run bug, which no longer reproduces.

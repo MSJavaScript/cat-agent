@@ -112,6 +112,7 @@ async def _test_routes() -> None:
         register_jobs: bool = True,
         recursion_limit: int | None = None,
         project_workdir: str | None = None,
+        expected_interrupt_id: str | None = None,
     ):
         calls.append({
             "agent_input": agent_input,

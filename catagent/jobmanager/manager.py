@@ -415,6 +415,14 @@ class JobManager:
         again.  Do not send a malformed callback with an empty interrupt id:
         the agent endpoint would reject it with HTTP 400 and the result would
         be lost.
+
+        The agent now ACKs a JobResult with HTTP 202 *before* it runs the
+        resume (see ``catagent/app/service.py::_accept_job_result``).  This
+        request therefore lasts milliseconds instead of the whole StepNode
+        turn.  It used to share the 30 s client timeout with a streaming
+        ``/chat`` response: the read timed out, we retried, and the retry ran
+        the same graph concurrently with the still-running original.  Keep
+        treating any 2xx as delivered; 202 is success, not "in progress".
         """
         if job_uuid in self._delivering:
             return
@@ -451,7 +459,8 @@ class JobManager:
                         headers={"Content-Type": "application/json"})
                     if 200 <= response.status_code < 300:
                         await self.db.mark_callback_delivered(job_uuid)
-                        logger.info(f"callback ok job_uuid = {job_uuid}.")
+                        logger.info(f"callback ok job_uuid = {job_uuid} "
+                                    f"(http={response.status_code}).")
                         return
                     # 404 means the target/thread is gone; treating it as
                     # delivered would silently lose the result.  Retry and

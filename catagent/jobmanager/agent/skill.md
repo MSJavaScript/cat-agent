@@ -72,6 +72,8 @@ Rules:
     | high | 32 |
     | ultra high | 64 |
 
+NOTE: Do not waste CPUs cores. For example, if there is only one NEB job with medium workload, but CPU has 64 cores, then try to fully use these cores.
+
 3. Write a `job.json` with the following content (if there are several groups of jobs, `job.json` should be generated in each dir of groups): 
     ```json
     {

@@ -14,6 +14,8 @@ The tests are grouped by what they exercise:
 | `test_register_raw_plan.py` | no | no | `register_raw_plan` in `append` and `replace` mode. |
 | `test_agent_stepnode.py` | no | no | StepNode finalization asks for a structured `RawStepResult`, retries three times, then falls back to `status="error"`. |
 | `test_agent_state_sync.py` | no | no | Outer↔orchestrator step sync: no lost updates, no stale preparation requests. |
+| `test_agent_liveness.py` | no | no | StepNode run registry, crash/cancel/dead-run reporting, and the request queue's waits. |
+| `test_agent_concurrency.py` | no | no | Per-thread run serialization, stale job-callback rejection, deterministic `job_uuid`, and the synchronous `202` JobResult ACK. |
 | `test_jobmanager_recovery.py` | no | embedded | Crash recovery: resumable submission/finalization, callback outbox, local exit codes, per-thread locks. |
 | `test_cli_jobs.py` | no | mocked HTTP | The debug CLI polls `/status/{job_uuid}` and resumes a JobSubmission itself. |
 | `test_app_skill_init.py` | no | no | Skill-index loading/remapping, graph `loaded_skills` seeding, 100-character skill-tool payloads, CLI parser options, and agent logging. |

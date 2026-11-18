@@ -117,6 +117,35 @@ async def test_dead_running_step_is_reported() -> None:
           f"a dead step must produce an error StepResult, got {result!r}")
 
 
+async def test_dead_running_step_is_not_masked_by_pending_sibling() -> None:
+    """A pending sibling must not hide a running step that has no owner.
+
+    Returning END on the first pending step was the old behaviour.  The graph
+    then stopped with the dead step still ``running``: no interrupt, no result,
+    no further router pass.
+    """
+    liveness.reset_step_runs()
+    dead_id = "plan-0:step-0:a"
+    pending_id = "plan-0:step-1:b"
+    state = {
+        "finalization": False,
+        "steps": {
+            dead_id: make_step(dead_id, status="running"),
+            pending_id: make_step(pending_id, status="pending",
+                                  preparation_done=False),
+        },
+        "orchestrator_requests": [],
+    }
+    command = await orchestrator_request_queue(state, config())
+    check(command.goto == "router",
+          f"a dead step must not be masked, got {command.goto!r}")
+    result = (command.update or {}).get("step_results", {}).get(dead_id)
+    check(result is not None and result.status == "error",
+          f"the dead step must produce an error StepResult, got {result!r}")
+    check(pending_id not in (command.update or {}).get("step_results", {}),
+          "a pending sibling must not be reported as crashed")
+
+
 async def test_paused_running_step_waits() -> None:
     liveness.reset_step_runs()
     step_id = "plan-0:step-0:a"
@@ -385,6 +414,8 @@ async def main() -> None:
         ("paused is not dead", test_paused_is_not_dead),
         ("running step with owner waits", test_running_step_with_owner_waits),
         ("dead running step is reported", test_dead_running_step_is_reported),
+        ("dead step is not masked by pending sibling",
+         test_dead_running_step_is_not_masked_by_pending_sibling),
         ("paused running step waits", test_paused_running_step_waits),
         ("pending step waits", test_pending_step_waits),
         ("finished step waits for router", test_finished_step_waits_for_router),
