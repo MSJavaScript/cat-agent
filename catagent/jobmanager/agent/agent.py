@@ -168,8 +168,8 @@ async def run_job_agent(
                 payload = {"role":None, "message":msg, "phase": phase}
                 log_msg = f"[Message]: {msg}"
 
-            # if log_msg:
-            #    logger.info(log_msg)
+            if log_msg:
+               logger.info(log_msg)
 
             if update.get("structured_response") is not None:
                 structured_response = update["structured_response"]

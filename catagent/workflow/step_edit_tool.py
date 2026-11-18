@@ -4,6 +4,7 @@ from langchain.messages import ToolMessage
 from .models import Step
 from typing import List, Dict, Set, Literal, Any
 import os 
+from pathlib import Path
 
 
 @tool 
@@ -59,6 +60,20 @@ def set_step_workdir(runtime:ToolRuntime[Any], step_id:str, workdir:str):
     ''' 
     if not os.path.isdir(workdir):
         raise NotADirectoryError(f"{workdir} is not a directory.")
+    project = runtime.context["project_workdir"]
+    if not project:
+        raise KeyError("project_workdir")
+    project_workdir = Path(os.path.expandvars(os.path.expanduser(project))).resolve()
+    resolved_workdir = Path(os.path.expandvars(os.path.expanduser(workdir))).resolve()
+    if not resolved_workdir.is_relative_to(project_workdir):
+        return Command(update={
+            "messages": [ToolMessage(
+                             status="error",
+                             content=f"Access denied. The workdir of a step must be under the project workdir {project_workdir}.",
+                             tool_call_id=runtime.tool_call_id,
+                             name="set_step_workdir")]
+        })
+    workdir = str(resolved_workdir)
     steps = runtime.state["steps"]
     if not step_id in steps:
         raise KeyError(f"{step_id} does not exist.")

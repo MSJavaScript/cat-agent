@@ -6,6 +6,7 @@ import asyncio, aiofiles, os, shlex
 from typing import List, Optional, Literal, Any
 from datetime import datetime
 from .parse_path import parse_path
+from catagent.workflow.models import skill_artifacts_from_skills
 from pathlib import Path
 
 
@@ -16,15 +17,181 @@ _SAFE_DEVICE_PATHS = {
     "/dev/stderr",
 }
 
+
+def _context_value(runtime: Any, key: str) -> Any:
+    """Read a key from a dict-like or model-like runtime context."""
+    context = getattr(runtime, "context", None)
+    if context is None:
+        return None
+    if isinstance(context, dict):
+        return context.get(key)
+    return getattr(context, key, None)
+
+
+def _resolved(path: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+
+
+def _allowed_dirs(runtime: Any) -> list[Path]:
+    """Directories an agent tool may access for this run.
+
+    ``project_workdir`` is always allowed.  Skill artifacts live outside the
+    project, so their directories are added for the run; both the orchestrator
+    and StepNode use the same allow-list (skill references are needed while
+    preparing a step, and scripts while running it).
+    """
+    project = _context_value(runtime, "project_workdir")
+    if not project:
+        # Fail closed instead of silently disabling the policy.
+        raise KeyError("project_workdir")
+    allowed = [_resolved(project)]
+
+    resource_dirs = _context_value(runtime, "resource_dirs") or {}
+    for directory in resource_dirs:
+        if directory:
+            allowed.append(_resolved(directory))
+
+    state = getattr(runtime, "state", None) or {}
+    artifacts = set(state.get("skill_artifacts_pathes") or set())
+    # The orchestrator state has `loaded_skills` but not the flattened
+    # `skill_artifacts_pathes` field, which is derived for StepNodes.  Derive it
+    # here as well so both agents see the same skill files.
+    artifacts.update(skill_artifacts_from_skills(state.get("loaded_skills") or {}))
+    for artifact in artifacts:
+        if artifact:
+            # Artifacts are files; allow their directory so helper modules and
+            # sibling scripts can be imported/executed.
+            directory = _resolved(os.path.dirname(artifact))
+            if directory not in allowed:
+                allowed.append(directory)
+    return allowed
+
+
+def _is_executable_on_path(path: Path) -> bool:
+    """True when ``path`` is an executable that PATH resolves to.
+
+    Shell commands routinely call ``/usr/bin/python3`` or a conda interpreter
+    by absolute path.  Those are legitimate even though they are outside the
+    project; allow them without opening up the directory they live in.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        return False
+    for entry in (os.environ.get("PATH") or "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            if (Path(entry).resolve() / resolved.name) == resolved:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _path_policy_error(runtime: Any, cwd: str, command: str) -> Optional[str]:
+    """Return an error message if ``command`` touches a path outside the roots.
+
+    The parser is regex based (``parse_path``), so this is a guard against
+    accidental wandering, not a sandbox: an obfuscated command can still read
+    outside paths.  See DEVELOPMENT.md for the remaining limitations.
+    """
+    allowed = _allowed_dirs(runtime)
+    project = allowed[0]
+
+    checked = [cwd, *parse_path(command, cwd)]
+    for raw in checked:
+        if not raw or raw in _SAFE_DEVICE_PATHS:
+            continue
+        # ``parse_path`` sees the ``//host`` in a URL as an absolute path.
+        # Network access is rejected separately by ``execute_shell``, so do not
+        # turn a harmless local ``--api-url http://...`` option into a denial.
+        if "://" in raw:
+            continue
+        expanded = os.path.expandvars(os.path.expanduser(raw))
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(cwd, expanded)
+        path = Path(expanded)
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path.absolute()
+
+        if any(resolved == root or resolved.is_relative_to(root)
+               for root in allowed):
+            continue
+        if _is_executable_on_path(path):
+            continue
+        return (
+            f"Access denied. Cannot access {raw}. `execute_shell` is only "
+            f"allowed to access the content under project workdir {project} "
+            f"and the files of loaded skills.\n"
+            f"You get this error because `execute_shell` detected that you are "
+            f"accessing outside of the workdir. Please focus on the computation "
+            f"task. If this is a misjudgment, rewrite the path relative to the "
+            f"workdir or split the command; if the file is genuinely required, "
+            f"ask the user before accessing it."
+        )
+    return None
+
+
+def _file_policy_error(
+    runtime: Any,
+    file_path: str,
+    action: str,
+    allow_skill_dirs: bool = False,
+) -> Optional[str]:
+    """Return an error message when ``file_path`` is outside the allowed roots.
+
+    ``project_workdir`` is the boundary for file tools.  Reading skill files is
+    allowed because the orchestrator and StepNode are given those references;
+    writing them is not, because installed skills are shared by every thread.
+    """
+    allowed = _allowed_dirs(runtime)
+    project = allowed[0]
+    if not allow_skill_dirs:
+        allowed = [project]
+
+    resolved = _resolved(file_path)
+    if any(resolved == root or resolved.is_relative_to(root) for root in allowed):
+        return None
+    return (
+        f"Access denied. You are only allowed to {action} files under project "
+        f"dir {project}."
+    )
+
+
 @tool
-async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: str, timeout: int = 60) -> dict:
+async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: Optional[str] = None, timeout: int = 60) -> dict:
     """
     Execute a shell command. Tips: Use `cat`, `head`, `grep`, `sed`, `awk` or `echo` etc. to quickly read or edit files. 
     Args:
         command: The command you want to execute.
-        cwd: Current working directory.
+        cwd: Current working directory. Defaults to the step workdir (the project workdir for the orchestrator).
         timeout: Time limit for command execution (in seconds).
     """
+    if cwd is None:
+        cwd = (_context_value(runtime, "step_workdir")
+               or _context_value(runtime, "project_workdir"))
+    if not cwd:
+        return Command(update={
+            "messages": [ToolMessage(
+                            status="error",
+                            content="Error: no workdir is available for this run.",
+                            tool_call_id=runtime.tool_call_id,
+                            name="execute_shell"
+                        )]
+        })
+    # Resolve a relative `cwd` against the step workdir.  Resolving it against
+    # the server cwd would silently run in the repository checkout.
+    cwd = os.path.expandvars(os.path.expanduser(cwd))
+    if not os.path.isabs(cwd):
+        base = (_context_value(runtime, "step_workdir")
+                or _context_value(runtime, "project_workdir"))
+        cwd = os.path.join(base, cwd)
+    cwd = os.path.abspath(cwd)
     forbidden = {'curl', 'wget', 'requests', 'httpx', 'aiohttp', 'urllib3'}
     for item in shlex.split(command):
         for forbid_item in forbidden:
@@ -48,49 +215,19 @@ async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: str, timeo
                         )]
         })
 
-    # 对于StepNode 进行路径检测。StepNode 最容易出现到处搜索文件debug的行为
-    # Orchestrator因为要搜集信息所以允许它这样做
-    if runtime.state["role"] == "StepNode":
-        project_workdir = Path(os.path.expandvars(os.path.expanduser(runtime.context["project_workdir"])))
-        project_workdir = project_workdir.resolve()
-
-        skill_artifacts_pathes = runtime.state.get("skill_artifacts_pathes", set())
-        allowed_dirs = { Path(os.path.expandvars(os.path.expanduser(os.path.dirname(p)))).resolve() 
-                        for p in skill_artifacts_pathes }
-        allowed_dirs.add(project_workdir)
-
-
-        pathes = [cwd]
-        pathes.extend(parse_path(command, cwd))
-        not_allowed = False
-        bad_path = ""
-
-        for p in pathes:
-            if 'python' in p:
-                continue
-            if p in _SAFE_DEVICE_PATHS:
-                continue
-            path = Path(os.path.expandvars(os.path.expanduser(p)))
-            if path.is_file() or path.is_dir():
-                resolved_path = path.resolve()
-                for allowed_dir in allowed_dirs:
-                    if resolved_path.is_relative_to(allowed_dir):
-                        break 
-                else:
-                    bad_path = str(path)
-                    not_allowed = True 
-                    break 
-
-        if not_allowed:
-            error_msg = f"Access denied. Cannot access {bad_path}. `execute_shell` is only allowed to access the content under project workdir {project_workdir}.\nYou get this error because `execute_shell` detected that you are accessing outside of the workdir. Please focus on the computation task. If this is a misjudgment, please change the writting format of command or write commands in to a bash file then execute."
-            return Command(update={
-                            "messages": [ToolMessage(
-                                status="error",
-                                content=error_msg,
-                                tool_call_id=runtime.tool_call_id,
-                                name="execute_shell"
-                            )]
-                })
+    # Both agents are bound by the project workdir.  The orchestrator needs to
+    # inspect and prepare files, but it can do that inside the project; the
+    # only outside files it may touch are the loaded skill artifacts.
+    policy_error = _path_policy_error(runtime, cwd, command)
+    if policy_error:
+        return Command(update={
+                        "messages": [ToolMessage(
+                            status="error",
+                            content=policy_error,
+                            tool_call_id=runtime.tool_call_id,
+                            name="execute_shell"
+                        )]
+            })
 
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -179,11 +316,9 @@ async def edit_file(
         end_line: End line number. `None` means the end of the line.
         add_timestamp: Add timestamp at the start of first line.
     '''
-    project_workdir = Path(os.path.expandvars(os.path.expanduser(runtime.context["project_workdir"])))
-    project_workdir = project_workdir.resolve()
-
-    if not Path(file_path).resolve().is_relative_to(project_workdir):
-        return f"Access denied. You are only allowed to edit files under project dir {project_workdir}."
+    policy_error = _file_policy_error(runtime, file_path, "edit")
+    if policy_error:
+        return policy_error
 
     if not os.path.isfile(file_path):
         dirname = os.path.dirname(file_path)
@@ -255,10 +390,9 @@ async def read_file(
         line range that was read, and `lines`, a list of `[line_number, line_content]`
         pairs so that every line number maps exactly to its content.
     '''
-    project_workdir = Path(os.path.expandvars(os.path.expanduser(runtime.context["project_workdir"])))
-    project_workdir = project_workdir.resolve()
-    if not Path(file_path).resolve().is_relative_to(project_workdir):
-        return f"Access denied. You are only allowed to read files under project dir {project_workdir}."
+    policy_error = _file_policy_error(runtime, file_path, "read", allow_skill_dirs=True)
+    if policy_error:
+        return policy_error
 
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")

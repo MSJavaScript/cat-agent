@@ -641,3 +641,105 @@ within the test's default 180 s callback wait; its DB row stayed in
 is a separate pre-existing jobmanager timeout/robustness issue (the
 `run_job_agent(phase="checking")` call has no timeout of its own); it is not the
 duplicate-run bug, which no longer reproduces.
+
+## 2026-11-18 — Silent death of `plan-0:step-4:sample_configs_iter1`
+
+### Incident and evidence
+
+In the real run at `/mnt/t/workdir/agent_test/db`, step 4 submitted job
+`7a6b0e50-a032-5916-9904-8f13f65cafde` at 15:12:31 and paused on outer
+interrupt `33851d95e1a957b3a475e8285b058bf9`. At 15:13:44 a normal chat message
+("leave step4 alone … directly go to the last step") was sent while that
+interrupt was still pending. The checkpoint written for that message contains
+`branch:to:init_skills` and **no `__interrupt__` write**: LangGraph started a
+new turn at the graph entry point and dropped the pending `interrupt_node`
+task. The job finished at 15:14:57; jobmanager posted the result at 15:15:06,
+but the detached run waited behind the user-message turn. When it finally ran
+at 15:16:45 its interrupt was no longer pending, so the stale-resume guard
+logged `Skipping stale job-result resume … pending interrupts are
+['2cd4cd5c…']` and discarded the result (that pending id belonged to step 7).
+The inner step-4 thread still has one head at 15:12:31 with its
+`JobSubmission` interrupt; nothing ever resumed it. The outer step stayed
+`status="running"` while the liveness registry still said `paused`, which the
+request queue treats as "not dead", so the router never reported it. The run
+ended with the user saying "step 4 is dead, it get stuck".
+
+### What changed
+
+#### `catagent/app/streaming.py`
+
+- **`PendingInterruptError`**: a new turn (`dict` input with `messages`) is now
+  refused while the thread has pending interrupts. The message names the
+  interrupt ids and, when available, the paused step from `_debug_source`.
+  This is the direct fix: a chat message can no longer silently discard the
+  only route back to a paused StepNode.
+- **`_pending_interrupts()`**: returns `(interrupt_id, debug_source)` pairs;
+  `_pending_interrupt_ids()` is now a thin wrapper so the stale-resume guard
+  behaviour is unchanged.
+- **Stale job results are reconciled**: when a callback's interrupt is gone,
+  `_reconcile_stale_job_result()` matches the callback's `local_dir` to the
+  step workdir. If that step is still `running` and its liveness record is
+  `paused`, the record is cleared, so the next queue pass reports it as dead
+  and the router can correct the plan. It does not touch a live
+  `running`/`scheduled` owner. The discard remains a warning-level event.
+- **`project_workdir` is seeded into the outer state** for dictionary inputs
+  that omit it (CLI/e2e). `_stream_chat` already resolved the root for the
+  runtime context, but `router.write_readme()` reads it from `WorkflowState`;
+  the e2e previously died with `KeyError: 'project_workdir'` before the guard
+  could be exercised.
+
+#### `catagent/app/service.py`
+
+- `POST /chat` now pre-checks pending interrupts for a normal message on an
+  existing thread and returns **409** with the same explanation, so the
+  browser keeps the typed text instead of clearing it after an SSE error.
+  `_stream_chat` re-checks under the per-thread lock to cover the race with an
+  in-flight run.
+- `_accept_job_result()` passes the callback's `local_dir` through
+  `_run_detached()` to `_stream_chat()` for the reconciliation above.
+
+### Regression tests
+
+`check/test_agent_concurrency.py`:
+
+- a normal message on a paused thread raises `PendingInterruptError`, names the
+  paused step, and does not start a graph run; a message on an idle thread
+  still runs;
+- a stale job result with a matching paused step clears the liveness record and
+  marks the step `DEAD`;
+- `POST /chat` with a message on a paused thread returns 409 and does not run
+  the graph.
+
+`check/test_agent_liveness.py`:
+
+- `_stream_chat` must put the resolved `project_workdir` into a new dict input
+  as well as the runtime context.
+
+The `submit_job` idempotence test now creates its own temp workdir with
+`run.sh` and `job_description.json`; it previously depended on `/tmp/step1`
+being left behind by an earlier test.
+
+### Verification
+
+- `python -m check.test_agent_concurrency` — **PASS**
+- `python -m check.test_agent_liveness` — **PASS**
+- `python -m check.test_debug_ui` — **PASS**
+- `python -m check.test_agent_stepnode` — **PASS**
+- `python -m check.test_agent_orchestrator` — **PASS**
+  (`orchestrator append plan test: OK`)
+- `python -m check.test_cli_jobs` — **PASS**
+- `python -m check.test_app_skill_init` — **PASS**
+- `python -m check.test_agent_state_sync` — **PASS**
+- `python -m check.test_jobmanager_recovery` — **PASS**
+- `python -m check.test_agent_e2e --timeout 600` — **PASS**
+  (`END-TO-END TEST: OK`, workdir `check/.tmp/e2e_e1f2c882`).
+
+### Remaining limitation
+
+The guard makes the trade-off explicit: while a step is paused, the thread is
+serialized and a new chat turn must wait for the pending interrupt (a job
+submission resumes automatically). The alternative — applying the user's
+message and keeping the paused step alive in parallel — would need a queued
+message / background-step design; silently dropping the interrupt is no longer
+allowed.
+

@@ -19,7 +19,7 @@ from langgraph.types import Command
 from .events import JOBMANAGER_SOURCE, DebugEventLog
 from .models import ChatRequest
 from .plan import get_plan
-from .streaming import _stream_chat
+from .streaming import PendingInterruptError, _pending_interrupts, _stream_chat
 
 logger = logging.getLogger("catagent")
 
@@ -227,6 +227,7 @@ async def build_app(
         workdir: str | None,
         register_jobs: bool = True,
         expected_interrupt_id: str | None = None,
+        job_local_dir: str | None = None,
     ) -> None:
         """Consume a graph run and publish its payloads to the event log.
 
@@ -246,6 +247,7 @@ async def build_app(
                 recursion_limit=app.state.recursion_limit,
                 project_workdir=workdir,
                 expected_interrupt_id=expected_interrupt_id,
+                job_local_dir=job_local_dir,
             ):
                 app.state.event_log.append(thread_id, payload)
         except asyncio.CancelledError:
@@ -285,6 +287,7 @@ async def build_app(
                 workdir=workdir,
                 register_jobs=req.register_jobs,
                 expected_interrupt_id=req.interrupt_id,
+                job_local_dir=req.local_dir,
             )
         )
         return JSONResponse(
@@ -372,6 +375,21 @@ async def build_app(
         else:
             thread_id, agent_input = _normal_input(req, workdir)
             expected_interrupt_id = None
+            # Refuse a new turn on a paused thread *before* streaming starts.
+            # `_stream_chat` re-checks under the per-thread lock; doing it here
+            # as well lets the client keep its message and get a clear 409
+            # instead of an SSE error after the input has been cleared.
+            # See PendingInterruptError for the step-4 incident this prevents.
+            if req.thread_id:
+                pending = await _pending_interrupts(
+                    catagent,
+                    {"configurable": {"thread_id": thread_id}},
+                )
+                if pending:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=str(PendingInterruptError(thread_id, pending)),
+                    )
 
         app.state.last_thread_id = thread_id
 

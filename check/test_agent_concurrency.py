@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
+import tempfile
 from types import SimpleNamespace
 from typing import Any, List
 
 import httpx
 
-from catagent.app.streaming import _stream_chat
+from catagent.app.streaming import PendingInterruptError, _stream_chat
 from catagent.stepnode.init_tools import init_job_manager_tools, tool_call_wrapper
 
 
@@ -61,14 +63,34 @@ class FakeCatagent:
             self.active -= 1
 
 
+class FakeInterrupt:
+    def __init__(self, interrupt_id: str, value: Any = None) -> None:
+        self.id = interrupt_id
+        self.value = value if value is not None else {}
+
+
 class FakeSnapshot:
-    def __init__(self, interrupt_ids: List[str]) -> None:
+    def __init__(
+        self,
+        interrupt_ids: List[str],
+        values: Any = None,
+        interrupt_values: Any = None,
+    ) -> None:
+        values = values or {}
+        interrupt_values = interrupt_values or {}
         self.tasks = [
-            SimpleNamespace(interrupts=[SimpleNamespace(id=interrupt_id)])
+            SimpleNamespace(
+                interrupts=[
+                    FakeInterrupt(
+                        interrupt_id,
+                        interrupt_values.get(interrupt_id),
+                    )
+                ]
+            )
             for interrupt_id in interrupt_ids
         ]
         self.interrupts = ()
-        self.values = {}
+        self.values = values
         self.next = ("interrupt_node",) if interrupt_ids else ()
 
 
@@ -127,6 +149,111 @@ async def test_stale_resume_is_skipped() -> None:
           f"calls={live.calls}")
 
 
+async def test_new_message_is_rejected_while_paused() -> None:
+    """A new turn must not silently discard a paused step's interrupt."""
+    step_id = "plan-0:step-4:sample_configs_iter1"
+    thread_id = "concurrency-paused-message"
+    paused = FakeCatagent(
+        FakeSnapshot(
+            ["step4-interrupt"],
+            values={
+                "steps": {
+                    step_id: SimpleNamespace(
+                        workdir="/tmp/case/step4", status="running"
+                    )
+                }
+            },
+            interrupt_values={
+                "step4-interrupt": {"_debug_source": f"{thread_id}:{step_id}"}
+            },
+        )
+    )
+    error = None
+    try:
+        async for _ in _stream_chat(
+            catagent=paused,
+            agent_input={"messages": ["skip step 4"]},
+            thread_id=thread_id,
+            job_manager_url="http://unused",
+            http_client=httpx.AsyncClient(),
+            register_jobs=False,
+            project_workdir="/tmp",
+        ):
+            pass
+    except PendingInterruptError as exc:
+        error = exc
+
+    check("new message while paused is rejected", error is not None,
+          "the message was allowed to discard the pending interrupt")
+    check("rejection names the paused step",
+          error is not None and step_id in str(error), f"error={error}")
+    check("rejection does not start a graph run", paused.calls == 0,
+          f"calls={paused.calls}")
+
+    fresh = FakeCatagent(FakeSnapshot([]))
+    async for _ in _stream_chat(
+        catagent=fresh,
+        agent_input={"messages": ["start"]},
+        thread_id="concurrency-idle-message",
+        job_manager_url="http://unused",
+        http_client=httpx.AsyncClient(),
+        register_jobs=False,
+        project_workdir="/tmp",
+    ):
+        pass
+    check("ordinary message on an idle thread still runs", fresh.calls == 1,
+          f"calls={fresh.calls}")
+
+
+async def test_stale_job_result_marks_paused_step_dead() -> None:
+    """A result that cannot be delivered must not leave the step 'paused'.
+
+    The queue treats ``paused`` as alive, so an orphaned paused record hides a
+    dead ``running`` step exactly as it hid step 4 in the 2026-11-18 run.
+    """
+    from catagent.workflow.liveness import (
+        DEAD,
+        clear_step_run,
+        mark_step_paused,
+        step_run_phase,
+    )
+
+    thread_id = "concurrency-stale-result"
+    step_id = "plan-0:step-4:sample_configs_iter1"
+    catagent = FakeCatagent(
+        FakeSnapshot(
+            ["some-other-interrupt"],
+            values={
+                "steps": {
+                    step_id: SimpleNamespace(
+                        workdir="/tmp/case/step4", status="running"
+                    )
+                }
+            },
+        )
+    )
+    clear_step_run(thread_id, step_id)
+    mark_step_paused(thread_id, step_id)
+    async for _ in _stream_chat(
+        catagent=catagent,
+        agent_input={},
+        thread_id=thread_id,
+        job_manager_url="http://unused",
+        http_client=httpx.AsyncClient(),
+        register_jobs=False,
+        project_workdir="/tmp",
+        expected_interrupt_id="stale-step4-interrupt",
+        job_local_dir="/tmp/case/step4/smoke_test",
+    ):
+        pass
+    check("stale job result does not start a run", catagent.calls == 0,
+          f"calls={catagent.calls}")
+    check("stale job result marks the paused step dead",
+          step_run_phase(thread_id, step_id) == DEAD,
+          f"phase={step_run_phase(thread_id, step_id)}")
+    clear_step_run(thread_id, step_id)
+
+
 async def test_deterministic_job_uuid() -> None:
     posted: List[dict] = []
 
@@ -142,29 +269,36 @@ async def test_deterministic_job_uuid() -> None:
             tool_call_id="call-1",
         )
 
-        def make_request(tool_call_id: str):
-            return SimpleNamespace(
-                tool=submit_tool,
-                tool_call={
-                    "name": "submit_job",
-                    "id": tool_call_id,
-                    "args": {
-                        "job_description": "relax",
-                        "local_dir": "/tmp/step1",
-                        "provider_name": "local",
-                        "job_env_name": "mock",
+        # submit_job validates the step directory before it posts anything.
+        # Use a throwaway directory with run.sh so the test does not depend on
+        # /tmp/step1 being left behind by an earlier run.
+        with tempfile.TemporaryDirectory() as local_dir:
+            pathlib.Path(local_dir, "run.sh").write_text("#!/bin/sh\n")
+            pathlib.Path(local_dir, "job_description.json").write_text("{}\n")
+
+            def make_request(tool_call_id: str):
+                return SimpleNamespace(
+                    tool=submit_tool,
+                    tool_call={
+                        "name": "submit_job",
+                        "id": tool_call_id,
+                        "args": {
+                            "job_description": "relax",
+                            "local_dir": local_dir,
+                            "provider_name": "local",
+                            "job_env_name": "mock",
+                        },
                     },
-                },
-                runtime=runtime,
-                state={},
-            )
+                    runtime=runtime,
+                    state={},
+                )
 
-        async def handler_fn(req):
-            raise AssertionError("submit_job must be handled by the wrapper")
+            async def handler_fn(req):
+                raise AssertionError("submit_job must be handled by the wrapper")
 
-        await tool_call_wrapper(make_request("call-1"), handler_fn)
-        await tool_call_wrapper(make_request("call-1"), handler_fn)
-        await tool_call_wrapper(make_request("call-2"), handler_fn)
+            await tool_call_wrapper(make_request("call-1"), handler_fn)
+            await tool_call_wrapper(make_request("call-1"), handler_fn)
+            await tool_call_wrapper(make_request("call-2"), handler_fn)
 
     check("replayed tool call reuses job_uuid",
           posted[0]["job_uuid"] == posted[1]["job_uuid"],
@@ -310,6 +444,21 @@ async def test_stale_ui_resume_is_skipped() -> None:
                 await response.aread()
             check("live UI resume still runs the graph", stale.calls == 1,
                   f"calls={stale.calls}")
+
+            # A normal message on a paused thread would start a new graph turn
+            # at the entry point and drop the pending interrupts.  The service
+            # must refuse it instead of silently abandoning the step.
+            response = await client.post(
+                "/chat",
+                json={
+                    "thread_id": "t-ui-paused",
+                    "message": "skip the paused step",
+                },
+            )
+            check("new message on a paused thread is rejected",
+                  response.status_code == 409, response.text)
+            check("rejected message did not run the graph", stale.calls == 1,
+                  f"calls={stale.calls}")
     finally:
         app_facade.build_runtime = original_build
         await runtime_client.aclose()
@@ -318,6 +467,8 @@ async def test_stale_ui_resume_is_skipped() -> None:
 async def main() -> None:
     await test_serialized_runs()
     await test_stale_resume_is_skipped()
+    await test_new_message_is_rejected_while_paused()
+    await test_stale_job_result_marks_paused_step_dead()
     await test_deterministic_job_uuid()
     await test_job_result_ack()
     await test_stale_ui_resume_is_skipped()

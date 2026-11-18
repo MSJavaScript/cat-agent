@@ -1,20 +1,18 @@
-"""Deterministic tests for the StepNode path policy in ``util_tools``.
+"""Deterministic tests for the workspace path policy in ``util_tools``.
 
-The policy is inlined in ``execute_shell`` (there is no standalone
-``_path_policy_error`` helper anymore).  These tests exercise the real tool
-functions:
+The policy is shared by the orchestrator and StepNodes:
 
-* for a ``StepNode``, ``execute_shell`` may only touch existing paths under
-  the project workdir or under a directory containing a skill artifact,
+* ``execute_shell`` may only touch paths under the project workdir, the files
+  of loaded skills, and executables that PATH resolves to,
 * safe device paths such as ``/dev/null`` are always allowed,
-* an ``Orchestrator`` is not bound by the project workdir,
-* ``read_file`` always stays inside the project workdir,
-* a command whose ``cwd`` is outside the project is rejected.
+* ``read_file`` may read project files and skill references, ``edit_file`` may
+  only write inside the project,
+* ``cwd`` defaults to the step workdir and is rejected when outside the project,
+* ``set_step_workdir`` cannot move a step outside the project.
 
-Known limitation, asserted explicitly: the inline policy only checks paths that
-already exist (``is_file() or is_dir()``), so a non-existent outside path is not
-denied.  Missing ``project_workdir`` context raises ``KeyError`` instead of
-returning a friendly message.
+The parser is regex based, so the guard stops accidental wandering rather than
+an adversarial command (see DEVELOPMENT.md).  Missing ``project_workdir``
+context raises ``KeyError`` instead of returning a friendly message.
 
 Run from the repository root:
 
@@ -25,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,7 +32,8 @@ from langchain.messages import HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from catagent.stepnode.stepnode import create_stepnode_agent
-from catagent.tools.other.util_tools import execute_shell, read_file
+from catagent.tools.other.util_tools import edit_file, execute_shell, read_file
+from catagent.workflow.step_edit_tool import set_step_workdir
 from check.scripted_model import ScriptedModel
 
 _SYSTEM_SKILLS = Path(__file__).resolve().parent.parent / "catagent" / "system_skills"
@@ -100,10 +100,18 @@ async def test_project_boundary() -> None:
         check("Access denied" in message.content, message.content)
         check(outside in message.content, message.content)
 
-        # Current behaviour: non-existent paths are not checked, so a path
-        # outside the project that does not exist yet is not denied.
+        # Current behaviour: a path outside the project is denied whether or
+        # not it exists, so a write cannot create files elsewhere either.
         missing = os.path.join(other, "not-created.txt")
         message = _message(await _run_shell(runtime, f"cat {missing}", project))
+        check("Access denied" in message.content, message.content)
+        check(missing in message.content, message.content)
+
+        # A missing path *inside* the project is not a policy violation.
+        missing_inside = os.path.join(project, "not-created.txt")
+        message = _message(
+            await _run_shell(runtime, f"cat {missing_inside}", project)
+        )
         check("Access denied" not in message.content, message.content)
 
 
@@ -128,6 +136,21 @@ async def test_skill_artifacts() -> None:
         message = _message(await _run_shell(runtime, f"ls {sibling}", project))
         check("Access denied" in message.content, message.content)
         check(sibling in message.content, message.content)
+
+        # The orchestrator keeps the paths inside `loaded_skills` rather than
+        # in the flattened field; the same allow-list must be derived from it.
+        orchestrator = SimpleNamespace(
+            state={
+                "role": "Orchestrator",
+                "loaded_skills": {
+                    "demo": {"references": [], "scripts": [{"path": script}]},
+                },
+            },
+            context={"project_workdir": project},
+            tool_call_id="call-2",
+        )
+        message = _message(await _run_shell(orchestrator, f"ls {script}", project))
+        check("Access denied" not in message.content, message.content)
 
 
 async def test_device_paths() -> None:
@@ -173,7 +196,7 @@ async def test_cwd_boundary_and_missing_directory() -> None:
         check("is not a directory" in message.content, message.content)
 
 
-async def test_orchestrator_is_not_bound() -> None:
+async def test_orchestrator_is_bound() -> None:
     with tempfile.TemporaryDirectory() as root:
         project = os.path.join(root, "project")
         other = os.path.join(root, "other")
@@ -182,8 +205,12 @@ async def test_orchestrator_is_not_bound() -> None:
         runtime = _runtime(project, role="Orchestrator")
 
         message = _message(await _run_shell(runtime, "ls", other))
+        check(message.status == "error", f"expected an error, got {message}")
+        check(other in message.content, message.content)
+
+        # The orchestrator can still work inside the project.
+        message = _message(await _run_shell(runtime, "ls", project))
         check("Access denied" not in message.content, message.content)
-        check("is not a directory" not in message.content, message.content)
 
 
 async def test_missing_context_fails_loudly() -> None:
@@ -224,6 +251,119 @@ async def test_read_file_boundary() -> None:
         result = await read_file.coroutine(runtime, outside)
         check(isinstance(result, str), f"expected a denial string, got {result!r}")
         check(result.startswith("Access denied"), result)
+
+
+async def test_skill_reference_read_but_not_edit() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        project = os.path.join(root, "project")
+        skill_root = os.path.join(root, "skill")
+        os.makedirs(project)
+        os.makedirs(skill_root)
+        reference = os.path.join(skill_root, "reference.md")
+        Path(reference).write_text("docs\n", encoding="utf-8")
+        runtime = _runtime(project, artifacts=[reference])
+
+        result = await read_file.coroutine(runtime, reference)
+        check(isinstance(result, dict), f"expected a dict, got {result!r}")
+        check(result["lines"][0][1] == "docs", result)
+
+        result = await edit_file.coroutine(runtime, reference, ["changed"], "overwrite")
+        check(isinstance(result, str), f"expected a denial string, got {result!r}")
+        check(result.startswith("Access denied"), result)
+        check(Path(reference).read_text(encoding="utf-8") == "docs\n", "skill file was modified")
+
+
+async def test_symlink_escape() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        project = os.path.join(root, "project")
+        other = os.path.join(root, "other")
+        os.makedirs(project)
+        os.makedirs(other)
+        outside = os.path.join(other, "secret.txt")
+        Path(outside).write_text("secret\n", encoding="utf-8")
+        link = os.path.join(project, "link")
+        os.symlink(other, link)
+        runtime = _runtime(project)
+
+        result = await read_file.coroutine(runtime, os.path.join(link, "secret.txt"))
+        check(isinstance(result, str), f"expected a denial string, got {result!r}")
+        check(result.startswith("Access denied"), result)
+
+        message = _message(
+            await _run_shell(runtime, f"cat {os.path.join(link, 'secret.txt')}", project)
+        )
+        check(message.status == "error", f"expected an error, got {message}")
+        check("Access denied" in message.content, message.content)
+
+
+async def test_default_cwd_uses_step_workdir() -> None:
+    with tempfile.TemporaryDirectory() as project, tempfile.TemporaryDirectory() as other:
+        runtime = SimpleNamespace(
+            state={"role": "StepNode", "skill_artifacts_pathes": set()},
+            context={"project_workdir": project, "step_workdir": project},
+            tool_call_id="call-1",
+        )
+        message = _message(
+            await execute_shell.coroutine(runtime, "echo ok > probe.txt", None, 10)
+        )
+        check(message.status != "error", message.content)
+        check(Path(project, "probe.txt").is_file(), message.content)
+        check(not Path(other, "probe.txt").exists(), "command ran in the wrong cwd")
+
+        # A relative `cwd` is resolved against the step workdir, not the server
+        # process cwd (which may be the repository checkout).
+        subdir = Path(project, "sub")
+        subdir.mkdir()
+        message = _message(
+            await execute_shell.coroutine(runtime, "echo rel > rel.txt", "sub", 10)
+        )
+        check(message.status != "error", message.content)
+        check((subdir / "rel.txt").is_file(), message.content)
+
+
+async def test_executable_on_path_is_allowed() -> None:
+    with tempfile.TemporaryDirectory() as project:
+        executable = shutil.which("sh") or shutil.which("ls")
+        check(executable is not None, "no shell executable found")
+        runtime = _runtime(project)
+        message = _message(
+            await _run_shell(runtime, f"{executable} --version", project)
+        )
+        check("Access denied" not in message.content, message.content)
+
+
+def test_shell_cwd_is_optional() -> None:
+    """The model may omit `cwd`; the tool then uses the step workdir."""
+    schema = execute_shell.tool_call_schema.model_json_schema()
+    check("cwd" not in schema.get("required", []), schema)
+    check("command" in schema.get("required", []), schema)
+
+
+def test_set_step_workdir_boundary() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        project = os.path.join(root, "project")
+        other = os.path.join(root, "other")
+        subdir = os.path.join(project, "jobs")
+        os.makedirs(subdir)
+        os.makedirs(other)
+        os.symlink(other, os.path.join(project, "link"))
+        runtime = SimpleNamespace(
+            state={"steps": {"s1": object()}},
+            context={"project_workdir": project},
+            tool_call_id="call-1",
+        )
+
+        for bad in (other, os.path.join(project, "link")):
+            command = set_step_workdir.func(runtime, "s1", bad)
+            message = _message(command)
+            check(message.status == "error", f"expected an error, got {message}")
+            check("Access denied" in message.content, message.content)
+
+        command = set_step_workdir.func(runtime, "s1", subdir)
+        check(
+            command.update["steps"]["s1"]["workdir"] == str(Path(subdir).resolve()),
+            command,
+        )
 
 
 async def test_stepnode_graph_receives_context() -> None:
@@ -270,9 +410,15 @@ def main() -> None:
         test_device_paths,
         test_forbidden_network_command,
         test_cwd_boundary_and_missing_directory,
-        test_orchestrator_is_not_bound,
+        test_orchestrator_is_bound,
         test_missing_context_fails_loudly,
         test_read_file_boundary,
+        test_skill_reference_read_but_not_edit,
+        test_symlink_escape,
+        test_default_cwd_uses_step_workdir,
+        test_executable_on_path_is_allowed,
+        test_shell_cwd_is_optional,
+        test_set_step_workdir_boundary,
         test_stepnode_graph_receives_context,
     ]
     for test in tests:

@@ -491,11 +491,25 @@ and the CLI prints it.
 
 ### Project workdir
 
-Every thread has one **project workdir**: the root directory its StepNodes may
-read and write. Skill artifact paths (the scripts/references of the loaded
-skills) are the only files outside it that `execute_shell` may touch;
-`read_file` and `edit_file` stay project-only. Paths are resolved before the
-check, so `..` and symlinks cannot escape it.
+Every thread has one **project workdir**. It is the boundary for both the
+orchestrator and its StepNodes, not just a suggested location:
+
+- `execute_shell` may touch the project, `resource_dirs`, the scripts/references
+  of the loaded skills, executables that `PATH` resolves to, and
+  `/dev/{null,stdin,stdout,stderr}`. Its `cwd` defaults to the current step
+  workdir (the project root for the orchestrator) and a model-supplied `cwd`
+  outside the project is rejected.
+- `read_file` may read project files, `resource_dirs`, and skill references;
+  `edit_file` is project-only, so the file-editing tool cannot modify installed
+  skills (shell writes into skill directories are still possible; see below).
+- `set_step_workdir` rejects a step workdir outside the project.
+- Paths are resolved before the check, so `..` and symlinks cannot escape it,
+  and a path that does not exist yet is checked as well.
+
+The guard is a regex-based policy, not an OS sandbox: a deliberately obfuscated
+command can still read outside the project. See
+[`DEVELOPMENT.md` §8](DEVELOPMENT.md#8-workspace-boundary-design-and-limitations)
+for the enforcement details and the remaining caveats.
 
 - **Debug UI** (`GET /`): creating a new thread opens a dialog asking for the
   workdir. The value is stored in `localStorage` and sent as `workdir` with the

@@ -382,11 +382,14 @@ async def test_stream_chat_forwards_recursion_limit() -> None:
 
     captured: dict = {}
     captured_context: dict = {}
+    captured_input: dict = {}
 
     class FakeAgent:
         async def astream(self, input, config, **kwargs):
             captured.update(config)
             captured_context.update(kwargs.get("context") or {})
+            if isinstance(input, dict):
+                captured_input.update(input)
             if False:  # pragma: no cover - async generator
                 yield {}
 
@@ -397,6 +400,9 @@ async def test_stream_chat_forwards_recursion_limit() -> None:
           f"_stream_chat dropped the recursion limit: {captured!r}")
     check(captured_context.get("project_workdir"),
           f"_stream_chat dropped the project workdir context: {captured_context!r}")
+    check(captured_input.get("project_workdir") == captured_context.get("project_workdir"),
+          f"_stream_chat did not seed project_workdir into the outer state: "
+          f"{captured_input!r} vs {captured_context!r}")
 
     captured.clear()
     captured_context.clear()

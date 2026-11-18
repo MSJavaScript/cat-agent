@@ -511,3 +511,97 @@ immediately, if the crash happened inside the same run).
 6. **Cancellation policy.** Today cancelling the HTTP stream cancels the graph
    run; decide whether a disconnect should stop the work or detach it, and
    reconcile that with the liveness phases.
+
+## 8. Workspace boundary: design and limitations
+
+### Why a prompt is not enough
+
+Both agents have `execute_shell`, and a shell can read anything the server
+process can read. Prompt rules ("only work in the workdir") did not stop the
+observed failure mode: a run launched from the repository root inherited that
+cwd, wrote `RigidMDMin.log`/`tmp.traj` into the checkout, and explored
+`catagent/skills/...` when it could not find an input. The enforcement therefore
+lives in the tools, not only in the prompts.
+
+### Where the root comes from
+
+`project_workdir` is part of the outer workflow runtime context
+(`WorkflowContext`), persisted in `WorkflowState`, and copied into both inner
+agents:
+
+- CLI: the directory the CLI was started from.
+- `POST /chat`: the optional `workdir` field, else the server cwd.
+- Debug UI: the value chosen in the new-thread dialog.
+- Inner graphs: `_outer_workdirs()` reads the runtime context and falls back to
+  the state fields for tests and older checkpoints.
+
+There is no separate "workspace" concept: the project workdir **is** the
+workspace. A thread is expected to keep every artifact of a step under it.
+
+### Enforcement (`catagent/tools/other/util_tools.py`)
+
+`_allowed_dirs()` builds the allow-list once per tool call:
+
+1. the resolved `project_workdir` (required; missing context raises `KeyError`
+   rather than silently disabling the policy),
+2. every entry of `resource_dirs`,
+3. the directory of every loaded-skill artifact (`skill_artifacts_pathes`).
+
+Both the orchestrator and StepNodes use the same list. Rules per tool:
+
+| Tool | Rule |
+| --- | --- |
+| `execute_shell` | `cwd` defaults to `step_workdir` (project root for the orchestrator). Every path extracted by `parse_path` plus `cwd` must resolve under the allow-list. Executables that `PATH` resolves to are allowed without allowing their directory. `curl`/`wget`/`requests`/`httpx`/... are rejected up front. |
+| `read_file` | project workdir + `resource_dirs` + skill artifact directories. |
+| `edit_file` | project workdir only, so the editing tool cannot modify installed skills (a shell write into an allowed skill directory is still possible; see the limitations). |
+| `set_step_workdir` | the directory must exist and resolve under `project_workdir`; it is stored canonicalized. |
+| Router | only dispatches a step whose workdir exists, and `set_step_workdir` is the only setter, so new steps cannot point outside the project. |
+
+`Path.resolve()` is applied before the check, so `..`, absolute paths, and
+symlinks are all caught. In particular a path that does not exist yet is
+checked too: writing `cat ../other/new.txt` is denied even though the file is
+absent. `_is_executable_on_path()` keeps absolute interpreter calls such as
+`/usr/bin/python3` working without whitelisting `/usr`.
+
+### Limitations
+
+This is a guard against accidental wandering, **not a security boundary against
+a malicious model or user**:
+
+- `parse_path` is regex based. It understands the common shell forms (pipes,
+  redirects, quotes, `-c` snippets, heredocs) but not variable expansion,
+  `eval`, generated strings, or the *contents* of a script. Writing a bash file
+  inside the project and running it bypasses the path check.
+- Allowing executables that `PATH` resolves to is broad. `python3 -c` is still
+  inspected when its code contains a literal path, but compiled/encoded
+  indirection is not.
+- URLs are skipped by the path check (`://`) because `parse_path` sees `//host`
+  as a path. Network access is blocked only by the command-name filter, which
+  is also not exhaustive.
+- The guard does not restrict processes that a permitted command starts. A
+  local job runner launched from the project has the same filesystem view as
+  the server.
+- Skill directories are in the shell allow-list, so `execute_shell` can also
+  write there (for example `echo > .../skills/x/scripts/run.py`). Only
+  `edit_file` is project-only. A read-only mount or an OS sandbox is needed to
+  make skill files truly immutable.
+- `resource_dirs` widens the boundary by design; keep it empty unless a thread
+  really needs a shared data directory.
+
+### Future work
+
+1. **OS sandbox for `execute_shell`.** Wrap each command in `bwrap` (or
+   `unshare` when user namespaces are available): bind the project read-write,
+   mount skill and software directories read-only, hide the repository and
+   `$HOME`. Fail closed when the wrapper is unavailable. At the time of writing
+   only `unshare` is installed on the development host; `bwrap` is not.
+2. **Copy or link skill scripts into the project.** Then the skill directories
+   do not need to be in the allow-list at all, which shrinks the writable
+   surface and removes a source of absolute paths in prompts.
+3. **Audit log.** Record every denied path with `(thread_id, step_id, tool,
+   command)` so repeated attempts are visible in the server log instead of only
+   in the model's context.
+4. **Policy unit tests for `edit_file` and `set_step_workdir`** already exist in
+   `check/test_path_guard.py`; extend them when a new path-bearing tool is
+   added. The suite also asserts the default `cwd` and a real StepNode graph
+   receiving its runtime context.

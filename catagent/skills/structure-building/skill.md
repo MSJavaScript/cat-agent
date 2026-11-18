@@ -14,6 +14,8 @@ For structure building, also see the "structure_building_tools" collection of St
 
 Building structure is a difficult task. `ase` and `pymatgen` only provide some simple and standard functions for structure building, for complex cases, you should use specialized tools or ask the user to provide structures. This document demonstrates examples of building simple structures using `ase` and `pymatgen`, and provides some simple wrapper scripts in the `scripts` dir for calling.
 
+TIPS: It's ok if the initial structures seem unphysical, e.g. adsorbed CO2 is not bent or CH4 is close to surface (it should be physical adsorption), DFT or MLFF relaxation will correct them automatically. Do not bother yourself to adjust them to be physical, this will only increase the complexity. The only things should be avoid are atom crowding and atomic fragments appear in vacuum.
+
 ## Structure format conversion
 You can use `ase` or `pymatgen` to convert a format into another, for example:
 ```bash
