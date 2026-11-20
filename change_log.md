@@ -743,3 +743,199 @@ message and keeping the paused step alive in parallel — would need a queued
 message / background-step design; silently dropping the interrupt is no longer
 allowed.
 
+## 2026-11-18 — `start_app_server.sh` database-open failure
+
+### Symptom
+
+`./start_app_server.sh` exited while building the app:
+
+```
+sqlite3.OperationalError: unable to open database file
+```
+
+even though `--db` pointed at
+`/mnt/t/workdir/agent_test/db/catagent_checkpoints.db` and that directory
+existed and was writable. The missing file itself was not the problem.
+
+### Diagnosis
+
+1. **A missing DB file with an existing directory is fine.**
+   `aiosqlite.connect()` creates the file on demand and
+   `AsyncSqliteSaver` creates its tables lazily. Starting the real server with
+   a fresh filename in an existing directory served HTTP 200 and created
+   `catagent_checkpoints.db` once the first checkpoint was read.
+2. **Missing parent directories do fail.** Reproduced both failure points:
+   `logging.FileHandler` raises `FileNotFoundError` for a missing `--log`
+   directory, and `sqlite3` raises `unable to open database file` for a
+   missing `--db` directory.
+3. **The workspace failure was a stale process, not the app.** Linux process
+   `1526013` (`python3 -`, started 15:42, cwd `.../agent_test/db`) still held
+   file descriptors to an already deleted `catagent_checkpoints.db` and its
+   `-wal`/`-shm` sidecars. On the case-insensitive Windows/WSL mount this left
+   the name in a pending-delete state: `touch catagent_checkpoints.db`
+   returned `ENOENT`, while `fresh1.db`, `x.sqlite` and
+   `CATAGENT_CHECKPOINTS.DB` were created normally. Killing the stale process
+   immediately allowed SQLite to create the database again, and
+   `start_app_server.sh` then started and answered `/plan/...` with HTTP 200.
+4. **The script had no shebang.** Executed as `./start_app_server.sh` it ran
+   under `sh`, where `source` is unavailable (`source: not found`), so the
+   virtualenv activation was skipped (the test environment already had the
+   right `python` on `PATH`, which is why the run continued).
+
+### Changes
+
+- **`start_app_server.sh`**: added `#!/usr/bin/env bash` so `source` works
+  when the script is executed directly.
+- **`catagent/app/log.py`**: create the parent directory of `--log` before
+  constructing `logging.FileHandler`; a fresh log directory no longer aborts
+  startup.
+- **`catagent/app/runtime.py`**:
+  - added `_ensure_parent_dir()` and call it before
+    `aiosqlite.connect()`; `:memory:` and `file:` URIs are left untouched;
+  - `sqlite3.OperationalError` from the connect is re-raised unchanged, with
+    an `add_note()` that names the path and the two common causes (missing or
+    unwritable directory, or another process still holding the file open).
+- **`check/test_app_skill_init.py`**: two regression tests:
+  - `test_logging_creates_parent_dir()` writes into a nested directory that
+    does not exist yet;
+  - `test_runtime_creates_db_parent_dir()` calls `build_runtime()` with a
+    nested missing DB path (model/graph patched, no network) and asserts the
+    directory and DB file are created.
+
+### Verification
+
+- `python -m check.test_app_skill_init` — **PASS**
+- `python -m check.test_debug_ui` — **PASS**
+- `python -m check.test_cli_jobs` — **PASS**
+- `python -m check.test_agent_orchestrator` — **PASS**
+  (`orchestrator append plan test: OK`)
+- `python -m check.test_agent_e2e --timeout 600` — **PASS**
+  (`END-TO-END TEST: OK`, workdir `check/.tmp/e2e_cb4ba814`)
+- Fresh-start check with **both** `--db` and `--log` under non-existent
+  directories: server answered `/plan/fresh` with HTTP 200 and created
+  `newdb/catagent_checkpoints.db` plus `newlogs/catagent.log`.
+- `./start_app_server.sh` after removing the stale process: HTTP 200 on
+  `/plan/verify-thread`, DB created in `/mnt/t/workdir/agent_test/db`.
+- Cleaned probe files (`fresh1.db`, `x.sqlite`, uppercase/trailing-space
+  variants) from the workspace DB directory.
+
+### Note
+
+If the same `unable to open database file` recurs on this mount, check for a
+process still holding a deleted `catagent_checkpoints.db` before changing the
+app:
+
+```
+lsof /mnt/t/workdir/agent_test/db/catagent_checkpoints.db
+ps aux | grep 'catagent\|python3 -'
+```
+
+## 2026-11-20 — Bohr submissions that report `JobId: 0`
+
+### Background
+
+A six-group Bohr job logged five real remote ids and one `jobid 0`. The group
+with id `0` was never created on Bohrium, but the jobmanager stored `0` as its
+`remote_id`. Every polling cycle then queried `bohr job describe -j 0` and
+logged:
+
+```
+ERROR jobmanager Failed to get the status of job {'0'} for 3 times.
+```
+
+Two problems contributed:
+
+- `BohrProvider.submit()` read the id from a fixed stdout line
+  (`split("\n")[1].split()[1]`) instead of from the `JobId:` label, so any
+  extra CLI output changed what was parsed.
+- Even a correctly parsed `0` was accepted as a remote id. The status query
+  also used `describe | awk`, which hides CLI/API errors (the CLI exits 0 and
+  writes the error to stdout).
+
+### Changes
+
+- **`catagent/jobmanager/providers/bohr.py`**
+  - `_parse_submit_job_id()` extracts the id with a `JobId:` regex, ignores
+    unrelated lines, rejects `0`/missing ids, and rejects multiple distinct
+    ids as ambiguous.
+  - `submit()` now fails with the raw stdout/stderr instead of persisting an
+    invalid id, so the job is reported as failed rather than polling forever.
+  - `_get_one_job_state()` validates that the id is a positive integer and
+    marks a malformed one as `FAILED`.
+  - status is read from `bohr job describe -j <id> --json` and checked for a
+    valid JSON payload; CLI/API error text is logged and retried instead of
+    being mistaken for a status word.
+- **`check/test_bohr_provider.py`**: regression tests for fixed-line parsing
+  (leading noise, single-line output, CRLF), `JobId: 0`, missing/multiple
+  ids, JSON status mapping, and invalid/unknown ids.
+
+### Verification
+
+- `python -m check.test_bohr_provider` — **PASS**
+- `python -m py_compile catagent/jobmanager/providers/bohr.py` — **PASS**
+
+### Note
+
+Rows already containing `remote_id = '0'` are now finalized as failed instead
+of being polled forever. A fresh attempt can be submitted for that group.
+
+## 2026-11-20 — Prunable SQLite checkpointer
+
+### Background
+
+`langgraph`'s `AsyncSqliteSaver` exposes `aprune()` through
+`BaseCheckpointSaver`, but the SQLite implementation is still
+`raise NotImplementedError`. The SQLite schema does not impose that limit:
+`checkpoints` is keyed by `(thread_id, checkpoint_ns, checkpoint_id)` and
+`writes` uses the same key, so individual snapshots can be deleted. The
+PostgreSQL saver (`AsyncPostgresSaver.aprune`) already implements this.
+
+### Changes
+
+- **`catagent/app/checkpointer.py`** (new): `PrunableAsyncSqliteSaver`, a
+  derived class implementing `aprune()`:
+  - `keep_latest` keeps the newest checkpoint of each namespace, deletes older
+    checkpoints and their writes, and clears a kept checkpoint's parent when
+    that parent was deleted;
+  - it keeps the head's parent when an old-format (`v < 4`) checkpoint stores
+    pending sends in the parent's `__pregel_tasks` writes;
+  - `delete` removes every checkpoint and write for the given threads;
+  - pruning runs in `BEGIN IMMEDIATE` transactions under the saver's lock, and
+    `writes` rows for not-yet-committed (in-flight) checkpoints are preserved;
+  - a synchronous `prune()` bridge mirrors the saver's other sync methods;
+  - unknown strategies and a bare string `thread_ids` are rejected, as in the
+    PostgreSQL saver.
+  - `DeltaChannel`-aware pruning is intentionally not implemented; the graphs
+    in this repository do not use `DeltaChannel`.
+- **`catagent/app/runtime.py`**: construct `PrunableAsyncSqliteSaver` instead
+  of `AsyncSqliteSaver`, so the checkpointer passed to the graph supports
+  `await checkpointer.aprune(...)`.
+- **`check/test_checkpointer_prune.py`** (new): deterministic tests for both
+  strategies, multiple namespaces, pending writes, old-format sends parents,
+  in-flight writes, idempotence, and validation.
+
+### Verification
+
+- `python -m check.test_checkpointer_prune` — **PASS**
+- `python -m check.test_app_skill_init` — **PASS**
+- `python -m py_compile catagent/app/checkpointer.py catagent/app/runtime.py` —
+  **PASS**
+- A real in-memory `StateGraph` was run through four `ainvoke` calls, pruned
+  with `keep_latest`, and resumed successfully; `aget_state` returned the same
+  value before and after pruning.
+
+### Usage
+
+```python
+# Drop all older snapshots of an inner StepNode thread.
+await checkpointer.aprune(chat_step_node_id)
+
+# Drop the thread's checkpoints entirely.
+await checkpointer.aprune(chat_step_node_id, strategy="delete")
+```
+
+The commented `aprune` calls in `catagent/agent.py` were left untouched; they
+can be enabled once the desired pruning points are decided.
+
+
+

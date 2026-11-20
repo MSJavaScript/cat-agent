@@ -21,7 +21,8 @@ The tests are grouped by what they exercise:
 | `test_app_skill_init.py` | no | no | Skill-index loading/remapping, graph `loaded_skills` seeding, 100-character skill-tool payloads, CLI parser options, and agent logging. |
 | `test_debug_ui.py` | no | no | Bounded event log, `GET /` HTML route (including the new-thread workdir dialog), `/events/{thread_id}`, jobmanager messages, and the unchanged `POST /` callback. |
 | `test_parse_path.py` | no | no | Regex-based `parse_path` extraction from shell operators, redirects, quoted paths, Python `-c`, heredocs, and URLs/comments. |
-| `test_path_guard.py` | no | no | Workspace guard shared by the orchestrator and StepNodes: project boundary for shell and file tools, skill references, `/dev/null`, PATH executables, forbidden network commands, `cwd` defaults, symlink escapes, and `set_step_workdir`. |
+| `test_bohr_provider.py` | no | no (mocked CLI) | Bohr submit-id parsing (extra CLI lines, `JobId: 0`, multi-id output) and JSON status parsing. |
+| `test_checkpointer_prune.py` | no | no | SQLite checkpointer `aprune`: keep-latest/delete, per-namespace pruning, pending writes, old-format sends parents, and input validation. |
 | `test_agent_orchestrator.py` | yes | mocked HTTP | The orchestrator reads a skill, plans, and registers an append plan. |
 | `test_agent_e2e.py` | yes | yes | Full workflow: orchestrator → router → StepNode → jobmanager callback → final report. |
 | `test_agent_real_jobmanager.py` | yes | yes (real `bohr` + `slurm-1`) | Four concurrent StepNodes submit real VASP single-point jobs; checks downloads, callbacks, and element/atom counts. |
@@ -153,7 +154,6 @@ python -m check.test_cli_jobs
 python -m check.test_app_skill_init
 python -m check.test_debug_ui
 python -m check.test_parse_path
-python -m check.test_path_guard
 ```
 
 Expected output:

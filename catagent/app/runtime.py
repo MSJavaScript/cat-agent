@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from typing import Literal
 
 import aiosqlite
 import dotenv
 import httpx
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from ..agent import create_catagent
+from .checkpointer import PrunableAsyncSqliteSaver
 from .skills import load_skill_index
 
 
@@ -63,6 +64,19 @@ def _infer_model_type(model_name: str) -> Literal["glm", "deepseek", "qwen"]:
     raise ValueError(f"Cannot infer model type from MODEL_NAME={model_name!r}.")
 
 
+def _ensure_parent_dir(path: str) -> None:
+    """Create the directory that will contain ``path`` when it is missing.
+
+    ``sqlite3`` creates the database file on demand but not intermediate
+    directories, so a fresh deployment whose ``--db`` points at a new folder
+    fails with the misleading ``unable to open database file``.  ``:memory:``
+    and SQLite URI names have no filesystem parent to create.
+    """
+    if not path or path == ":memory:" or path.startswith("file:"):
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+
 async def build_runtime(
     dotenv_path: str,
     db_path: str,
@@ -93,8 +107,22 @@ async def build_runtime(
             api_key=os.getenv("API_KEY"),
         )
 
-        db_conn = await aiosqlite.connect(db_path, isolation_level=None)
-        checkpointer = AsyncSqliteSaver(db_conn)
+        _ensure_parent_dir(db_path)
+        try:
+            db_conn = await aiosqlite.connect(db_path, isolation_level=None)
+        except sqlite3.OperationalError as exc:
+            # Preserve the original exception (and its type) for callers, but
+            # leave a note in the traceback that points at the common causes:
+            # a missing/unwritable parent directory, or another process that
+            # still has the old file open (which on Windows/WSL blocks
+            # recreating a deleted database under the same name).
+            exc.add_note(
+                f"Checkpoint database: {db_path!r}. Ensure its parent "
+                "directory exists and is writable, and that no other process "
+                "still holds the file open."
+            )
+            raise
+        checkpointer = PrunableAsyncSqliteSaver(db_conn)
 
         create_kwargs = {
             "model": model,

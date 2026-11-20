@@ -402,6 +402,7 @@ def create_catagent(model:BaseChatModel,
                                          processed=False,
                                          summary=raw_step_result.get("summary", ""))
 
+                await checkpointer.aprune([chat_step_node_id])
                 # 转到router，更新steps_result
                 command = Command(goto="router",
                                   update={ "step_results": {step_id: step_result} })
@@ -431,10 +432,12 @@ def create_catagent(model:BaseChatModel,
             # The pending inner interrupt is preserved in its checkpoint and is
             # re-surfaced by the recovery block above on the next run.
             clear_step_run(thread_id, step_id)
+            await checkpointer.aprune([chat_step_node_id])
             raise
         except GraphBubbleUp:
             # Control-flow exceptions (interrupts) must reach LangGraph.
             clear_step_run(thread_id, step_id)
+            await checkpointer.aprune([chat_step_node_id])
             raise
         except Exception as exc:
             # An uncaught exception used to abort the whole superstep: the
@@ -449,6 +452,7 @@ def create_catagent(model:BaseChatModel,
             if not step_id:
                 # Nothing to attribute the failure to; keep the old behaviour.
                 raise
+            await checkpointer.aprune([chat_step_node_id])
             return Command(goto="router", update={
                 "step_results": {step_id: StepResult(
                     status="error",
@@ -569,6 +573,7 @@ def create_catagent(model:BaseChatModel,
             # the old whole-state behaviour.
             steps_update = _steps_delta(baseline_steps, post_steps)
 
+            await checkpointer.aprune([thread_id])
             return Command(goto="node_set_flag",
                            update={
                                "steps": steps_update,

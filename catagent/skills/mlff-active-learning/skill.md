@@ -181,7 +181,7 @@ mv POSCAR* poscar
 
 
 ### 4. Check the trajectory and extract structures
-Running NEB and structure relaxation with MLFF sometimes fails, because potential energy surface (PES) maybe not well described. If the relaxation trajectory is too long, we consider it to be problematic and extract structures from it.  Use `scripts/check_traj.py` to do this.
+Running NEB and structure relaxation with MLFF sometimes fails, because potential energy surface (PES) maybe not well described. If the relaxation trajectory is too long (e.g. > 100.), this indicates atoms are wandering back and forth on the PES, we consider this to be problematic and extract structures from it.  Use `scripts/check_traj.py` to do this.
 
 ```bash
 # Extract structures from structures relaxation trajectory
@@ -190,7 +190,7 @@ python3 check_traj.py --traj opt.traj -o opt_out.extxyz -n 5
 # Extract structures from NEB trajectory, two end points are ignored because they are IS and FS and keep fixed during the relaxation.
 python3 check_traj.py --traj opt.traj -o neb_out.extxyz  --neb -n 5
 ```
-use `--nstep_thres` to set the threshold of reasonable steps.
+use `--nstep_thres` to set the threshold of reasonable steps. Default is 100, for very complex system, we should allow a larger value.
 
 The extracted `extxyz` contains geometry only: energies and forces evaluated by the MLFF are not copied, so the file can be sent to DFT without stale labels. Use `--seed` (default 42) for reproducible sampling, and `--sample uniform` to spread the extracted frames evenly over the trajectory (the last step is always included). For NEB, `-n` is the number of structures extracted from *each* intermediate image, and the number of images is inferred from the repeated initial-state frames; pass `--nimages` explicitly if an image coincides with the initial state. `check_traj.py` exits with code 0 when no structure needs to be extracted and code 1 when the trajectory is broken or unreadable, so batch scripts can tell "converged" from "failed".
 
@@ -226,6 +226,9 @@ When DFT job is done, we get another training dataset, say "dataset2.hdf5". Then
 
 We repeat the steps 2,3 and 4, until all the structure relaxations and NEBs converge within a reasonable range of steps, that is, `check_traj.py` cannot extract structures from the trajectories anymore (it prints `No structures are extracted.` and exits with code 0).
 
+### How to decrease the computation load
+
+Even though we accelerate the calculation with MLFF, the DFT labelling might be heavy for complex surface. For a step surface, there may be more than 5 different kinds of sites,  then for the co-adsorption of CO+O, there will be 10+ possibilities. However, these configs are not essentially different, we can select a part of them when we extract structures. For example, we randomly pick five of them to preform sampling and DFT labelling. If some configs fail to converge in relaxation or NEB, we then extract structures from those failed trajectories.
 
 ## Workflow for general systems
 If you only want to run MD or calculate the state of equation (EOS) of a system, the workflow is much simpler.
@@ -320,7 +323,6 @@ Every step will generate a lot of files. To keep the file system clean, Orchestr
 iter0_init_sampling   iter0_finetune    iter0_mlff_neb
 iter1_DFT_sampling    iter1_finetune    iter1_mlff_neb ...
 ```
-The StepNode should make sure to work in a subdir which corresponding the current step. 
 
 There are many elementary reactions in a study, give them a descriptive name such as `<reaction_name>_<facet>_<index>`. To avoid omissions, StepNode should maintain a `report.md` during execution. For example:
 ```md

@@ -10,12 +10,15 @@ metadata:
 
 # Build simple structures with ase and pymatgen 
 
-For structure building, also see the "structure_building_tools" collection of StepNode in "stepnode-tools" skill.
+Main rule of structure building: 
+1. Atoms should not crowd together. `ase.data` provides a  `covalent_radii` dict containing the covalent radii of atoms. The sum of the covalent radii of two atoms is a good reference for the reasonable distance between atoms.
+2. Molecules should not dissociate in vacuum, they only dissociate on a site of catalyst.
+3. For NEB task, the atomic indices must be matched and orientation of fragments must be aligned. For example, for reaction "CH3 + CH2 <-> CH3CH2", if the indices are not matched or C-C atoms are not aligned, NEB interpolation will result in a very atom-crowded and twisted NEB path, NEB will never converge.
+4. Except the mandatory requirements mentioned above, it's OK if the initial structure is not precisely physical. For example, it's not necessary to require CO2 adsorbs on surface with a bent configuration; it's also OK if the water layer you build dose not have a well-defined hydrogen bond network. As long as the atoms are not crowded together (satisfy 1,2 and 3), subsequent DFT or MLFF structure relaxation will guide to the structure to reasonable configuration. It's very usual to build a structure step by step. For example, when building a electrochemical interface, we firstly build a surface and put 10~20 H2O molecules above the surface. The orientations of these H2O molecules are not important, just randomly and evenly place them above the slab. Then we perform a quick relaxation by MLFF or cheap DFT (small ENCUT, loose EDIFF and EDIFFG, gamma only KPOINTS). 
 
-Building structure is a difficult task. `ase` and `pymatgen` only provide some simple and standard functions for structure building, for complex cases, you should use specialized tools or ask the user to provide structures. This document demonstrates examples of building simple structures using `ase` and `pymatgen`, and provides some simple wrapper scripts in the `scripts` dir for calling.
+NOTE: For structure building, also see the "structure_building_tools" collection of StepNode in "stepnode-tools" skill. Tools in this collection directly generate non-crowded and IS-FS atomic indices matched, orientations aligned structures. They can be directly use in DFT calculation.
 
-TIPS: It's ok if the initial structures seem unphysical, e.g. adsorbed CO2 is not bent or CH4 is close to surface (it should be physical adsorption), DFT or MLFF relaxation will correct them automatically. Do not bother yourself to adjust them to be physical, this will only increase the complexity. The only things should be avoid are atom crowding and atomic fragments appear in vacuum.
-
+Below are basic usage of `ase` and `pymatgen` on structure building.
 ## Structure format conversion
 You can use `ase` or `pymatgen` to convert a format into another, for example:
 ```bash

@@ -17,6 +17,7 @@ from catagent.tools.other.util_tools import execute_shell, edit_file, read_file
 from .models import ToolNamespace, AgentInterrupt, JobSubmission, AskForArgs, StepNodeContext
 from typing import List,  Dict,  Any, Literal, Optional, Tuple, Annotated
 import httpx, logging, uuid, os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,13 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
             return (False, f"Error: run.sh does not exist in {local_dir}.")
         if not os.path.isfile(os.path.join(local_dir, "job_description.json")):
             return (False, f"Error: job_description.json does not exist in {local_dir}.")
+        base = Path(local_dir)
+        for a in ["run.sh", "job_description.json"]:
+            files = [str(fpath) for fpath in base.rglob(a) if fpath.is_file()]
+            nfiles = len(files)
+            if nfiles != 1:
+                return (False, f"Error: The should be one and only one {a} file in {local_dir}, but find {nfiles}.")
+                    
         # `job_uuid` is injected by `tool_call_wrapper`, not by the model.  It is
         # derived from (inner thread id, tool_call_id), which are both stable
         # when LangGraph replays a checkpoint.  A replay therefore addresses the

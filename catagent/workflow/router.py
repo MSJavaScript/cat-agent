@@ -527,12 +527,12 @@ def write_readme(workdir_path:str,
 
         f.write('\n')
         rules = ["You should only focus on computation task, please following the following rules:",
-                 f"- Please only work in workdir {step.workdir}.",
+                 f"- Please only work in workdir {step.workdir}. You can only access files in project workdir {project_workdir} and files of provided skills. Do not access other dirs or files.",
                  f"- If you need to submit a job, firstly write a run.sh and job_description.json",
-                 f"- You can only access files in project workdir {project_workdir} and files of provided skills. Do not access other dirs or files."
-                 f"- Do not try to debug any repo. Focus the scientific problem and computation task.",
                  f"- Leave the job submission and downloading to Jobmanager, you should not care about them.",
-                 f"- Do not use curl, wget or git etc. Do not install anything by yourself. If you really need, call `pause_to_ask` to ask user for help."]
+                 f"- Don't try to debug any repo. Focus the scientific problem and computation task.",
+                 f"- Don't use curl, wget or git etc. Don't install anything by yourself. If you really need, call `pause_to_ask` to ask user for help.",
+                 f"- Be concise and fast, don't do the analysis that is not asked by the user."]
         f.write("## Rules\n")
         for line in rules:
             f.write(f"{line}\n")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import os
 import queue
 
 
@@ -26,6 +27,10 @@ def setup_logging(log_path: str | None = None,
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     output: logging.Handler
     if log_path:
+        # FileHandler creates the log file itself but not its parent
+        # directory, so ``--log /new/dir/catagent.log`` used to abort startup
+        # with FileNotFoundError before the app could even begin.
+        os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
         output = logging.FileHandler(log_path)
     else:
         output = logging.StreamHandler()

@@ -26,7 +26,7 @@ For catalytic computation, we usually use `ALGO = Fast`. For other cases we can 
 #### Geometry optimization
 `IBRION` controls how ions move duration calculation. `IBRION = 2` is good for most cases. For small molecules, such as CH4, CO2 etc, we need very accurate geometry to eliminate imaginary frequency. In this case use `IBRION = 1` and a very small `POTIM`, e.g. `POTIM = 0.08`. Becuase the initial geometry of molecule is usually close to energy minimum, use large step will cause trajectory oscillation, make it hard to converge.
 
-Use `ISIF = 2` for molecule and slabs, `ISIF = 3` for bulk to simultaneously relax the lattice constants. 
+Use `ISIF = 2` for molecule and slabs, `ISIF = 3` for bulk to simultaneously relax the lattice constants.  Remeber add `NSW` tag.
 
 #### Smearing
 

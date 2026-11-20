@@ -7,8 +7,13 @@ and executed.
 | demo | topic |
 | --- | --- |
 | [`event_log_demo/`](event_log_demo/) | why `catagent/app/events.py` exists: server-side event recording, polling with sequence cursors, out-of-band jobmanager callbacks, restart detection |
+| [`job_resume_demo/`](job_resume_demo/) | replacing the jobmanager → agent HTTP callback with an in-process callback or event bus: what gets simpler, what must stay durable |
 
 ```bash
 cd learn/event_log_demo
 uvicorn app:app --reload --port 8010
+
+cd learn/job_resume_demo
+python demo.py
+python test_demo.py
 ```

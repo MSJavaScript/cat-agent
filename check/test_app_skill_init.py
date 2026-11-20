@@ -208,6 +208,66 @@ def test_agent_logging() -> None:
         log.propagate = old_propagate
 
 
+def test_logging_creates_parent_dir() -> None:
+    """``--log`` inside a new directory must not abort startup."""
+    from catagent.app import setup_logging, shutdown_logging
+
+    log = logging.getLogger("catagent")
+    old_handlers = list(log.handlers)
+    old_level = log.level
+    old_propagate = log.propagate
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fresh" / "logs" / "catagent.log"
+            assert not path.parent.exists()
+            listener = setup_logging(str(path), "info")
+            try:
+                log.info("nested logging smoke test")
+            finally:
+                shutdown_logging(listener)
+            text = path.read_text()
+            assert "INFO catagent nested logging smoke test" in text, text
+    finally:
+        for handler in list(log.handlers):
+            log.removeHandler(handler)
+        for handler in old_handlers:
+            log.addHandler(handler)
+        log.setLevel(old_level)
+        log.propagate = old_propagate
+
+
+def test_runtime_creates_db_parent_dir() -> None:
+    """A fresh ``--db`` path must create its parent directory and DB file."""
+    import catagent.app.runtime as runtime_module
+
+    async def _build(db_path: Path) -> None:
+        # The model and graph need no network here: only the checkpointer's
+        # aiosqlite connection is exercised.  ``deepseek-*`` keeps the model
+        # type inference happy while ``create_llm_model`` is replaced.
+        with mock.patch.object(
+            runtime_module, "create_llm_model", return_value=object()
+        ), mock.patch.object(
+            runtime_module, "create_catagent", return_value=object()
+        ), mock.patch.dict(os.environ, {"MODEL_NAME": "deepseek-test"}):
+            _graph, client, conn = await runtime_module.build_runtime(
+                dotenv_path="",
+                db_path=str(db_path),
+                job_manager_url="http://127.0.0.1:9",
+            )
+        try:
+            assert db_path.is_file(), f"checkpoint DB was not created: {db_path}"
+            cursor = await conn.execute("select name from sqlite_master")
+            await cursor.fetchall()
+        finally:
+            await conn.close()
+            await client.aclose()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "fresh" / "db" / "checkpoints.db"
+        assert not db_path.parent.exists()
+        asyncio.run(_build(db_path))
+
+
 def main() -> None:
     test_repository_index()
     test_moved_checkout()
@@ -216,6 +276,8 @@ def main() -> None:
     asyncio.run(_test_graph_seeding())
     test_cli_option_default()
     test_agent_logging()
+    test_logging_creates_parent_dir()
+    test_runtime_creates_db_parent_dir()
     print("APP SKILL/PAYLOAD TESTS: OK")
 
 

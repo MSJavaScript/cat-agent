@@ -119,21 +119,16 @@ def _path_policy_error(runtime: Any, cwd: str, command: str) -> Optional[str]:
         except OSError:
             resolved = path.absolute()
 
-        if any(resolved == root or resolved.is_relative_to(root)
-               for root in allowed):
+        if (not path.is_dir()) and (not path.is_file()):
+            continue 
+
+        if any(resolved == root or resolved.is_relative_to(root) for root in allowed):
             continue
         if _is_executable_on_path(path):
             continue
-        return (
-            f"Access denied. Cannot access {raw}. `execute_shell` is only "
-            f"allowed to access the content under project workdir {project} "
-            f"and the files of loaded skills.\n"
-            f"You get this error because `execute_shell` detected that you are "
-            f"accessing outside of the workdir. Please focus on the computation "
-            f"task. If this is a misjudgment, rewrite the path relative to the "
-            f"workdir or split the command; if the file is genuinely required, "
-            f"ask the user before accessing it."
-        )
+
+        return f"Access denied. Cannot access {raw}. `execute_shell` is only allowed to access the content under project workdir {project} and the files of loaded skills.\nYou get this error because `execute_shell` detected that you are accessing outside of the workdir. Please focus on the computation task. If this is a misjudgment, rewrite the command with a different format or write them into a script file then execute."
+    
     return None
 
 
@@ -157,10 +152,7 @@ def _file_policy_error(
     resolved = _resolved(file_path)
     if any(resolved == root or resolved.is_relative_to(root) for root in allowed):
         return None
-    return (
-        f"Access denied. You are only allowed to {action} files under project "
-        f"dir {project}."
-    )
+    return f"Access denied. You are only allowed to {action} files under project dir {project}."
 
 
 @tool

@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 source /mnt/t/softwares_install/lang-graph/bin/activate
 export PYTHONPATH="/mnt/t/programming/myagents/cat-agent-dev:$PYTHONPATH"
 python -m catagent.app --serve \

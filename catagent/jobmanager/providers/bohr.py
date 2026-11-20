@@ -4,13 +4,46 @@ from catagent.jobmanager.models import JobStatus, JobSetting
 
 from pydantic import BaseModel, Field
 from typing import List, Dict, Literal, Optional, Set, Tuple
-import os, logging, json, asyncio, shlex, shutil
+import os, logging, json, asyncio, shlex, shutil, re
 from subprocess import check_output
 
 logger = logging.getLogger("jobmanager")
 
 # 同时查询状态的最大并发数，避免一次性拉起过多CLI进程。
 _STATUS_QUERY_CONCURRENCY = 16
+
+# Bohr job ids are positive integers.  Matching the label (instead of taking a
+# fixed line/token from stdout) keeps parsing correct when the CLI prints
+# warnings or progress lines before/after the success message.
+_SUBMIT_JOB_ID_RE = re.compile(r"\bJob\s*Id\s*:\s*(\d+)", re.IGNORECASE)
+_VALID_JOB_ID_RE = re.compile(r"[1-9]\d*")
+
+def _parse_submit_job_id(stdout: str) -> Optional[str]:
+    """Return the numeric JobId printed by ``bohr job submit``.
+
+    The CLI prints several lines (and may print extra warnings), so the id is
+    read from its ``JobId:`` label rather than from a fixed line and column.
+    ``None`` means "success message but no usable id" (e.g. the ``JobId: 0``
+    that Bohrium returns when it rejects a submission internally); the caller
+    must then fail the submission instead of persisting a bogus remote id.
+
+    A submission that reports more than one distinct id is ambiguous: the
+    jobmanager stores exactly one remote id per group, so this is an error.
+    """
+    matches = _SUBMIT_JOB_ID_RE.findall(stdout or "")
+    if not matches:
+        return None
+    job_ids = {str(int(value)) for value in matches}
+    if len(job_ids) > 1:
+        raise RuntimeError(
+            f"`bohr job submit` reported multiple JobIds: {sorted(job_ids)}")
+    job_id = job_ids.pop()
+    # int("0") is well-formed but never a real job id.
+    if not _VALID_JOB_ID_RE.fullmatch(job_id):
+        return None
+    return job_id
+
+
 class BohrJobEnv(BaseModel):
     type:Literal["bohr"] = "bohr"
     name: str
@@ -111,7 +144,15 @@ class BohrProvider(BaseProvider):
         return [item.model_dump(mode="python") for item in self.resources]
 
     async def _get_one_job_state(self, jid: str, semaphore: asyncio.Semaphore) -> Tuple[str, JobStatus]:
-        command = f"bohr job describe -j {jid} | awk -F, '{{print $12}} ' | tail -1"
+        jid = str(jid).strip()
+        if not _VALID_JOB_ID_RE.fullmatch(jid):
+            # A malformed id (typically the "0" printed for a rejected
+            # submission) can never be queried.  Retrying forever would leave
+            # the parent job stuck, so fail this group instead.
+            logger.error(f"Invalid bohr job id {jid!r}; marking the sub-job as failed.")
+            return jid, JobStatus.FAILED
+
+        command = f"bohr job describe -j {jid} --json"
         async with semaphore:
             try:
                 output = await run_shell_command(command)
@@ -121,15 +162,29 @@ class BohrProvider(BaseProvider):
         if output["return_code"] != 0:
             logger.error(f"Cannot get the state of job with id {jid}: {output['stderr'].strip()}")
             return jid, JobStatus.NONE
-        statusStr = output["stdout"].strip()
-        if statusStr:
-            # `awk ... | tail -1` also returns the header cell while the job
-            # is still being created, and the CLI may emit other transient
-            # words before the job is running.  Treat anything we cannot map
-            # as "state not known yet" (NONE) instead of UNKNOWN: UNKNOWN is a
-            # terminal state for the manager and would make it download the
-            # results of a job that has not produced any output yet.
-            statusStr = statusStr.splitlines()[-1].strip()
+
+        # The CLI writes API errors (invalid id, not found, ...) to stdout and
+        # still exits with 0, so JSON decoding is the real success check.
+        stdout = output["stdout"].strip()
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            detail = stdout or output["stderr"].strip()
+            logger.error(f"Cannot get the state of job with id {jid}: {detail}")
+            return jid, JobStatus.NONE
+
+        if isinstance(payload, dict):
+            payload = [payload]
+        if not isinstance(payload, list) or not payload:
+            logger.error(f"Cannot get the state of job with id {jid}: "
+                         f"unexpected describe response {stdout!r}")
+            return jid, JobStatus.NONE
+
+        # `-j` accepts multiple ids; keep this robust if that ever changes.
+        record = next((item for item in payload
+                       if str(item.get("id")) == jid), payload[0])
+        statusStr = str(record.get("statusStr") or "").strip()
+
         if statusStr in ("Finished", "Completed", "Succeeded", "Success"):
             return jid, JobStatus.COMPLETED
         if statusStr in ("Failed", "Error"):
@@ -139,9 +194,9 @@ class BohrProvider(BaseProvider):
         if statusStr in ("Scheduling", "Pending", "Queued", "Queueing",
                          "Waiting", "Creating", "Submitted"):
             return jid, JobStatus.SUBMITTED
-        if statusStr in ("Cancelled", "Canceled", "Terminated"):
+        if statusStr in ("Cancelled", "Canceled", "Terminated", "Stopped"):
             return jid, JobStatus.CANCELLED
-        if statusStr in ("", "statusStr"):
+        if statusStr == "":
             logger.debug(f"Job {jid} has no status yet (describe returned {statusStr!r}).")
         else:
             logger.warning(f"Job {jid} has an unrecognized status {statusStr!r}; "
@@ -253,12 +308,23 @@ class BohrProvider(BaseProvider):
 '''
         try:
             output = await run_shell_command(command, setting.local_dir, 300)
-            if output["return_code"] != 0 or (not 'succeed' in output["stdout"]):
+            stdout = output["stdout"]
+            if output["return_code"] != 0 or "succeed" not in stdout.lower():
                 logger.warning(f"Job submission {setting.job_name} to bohr failed.")
                 raise RuntimeError(f"Failed to submit job {setting.job_name} to bohr. \
-                                   Return code: {output["return_code"]}. Stdout: {output["stdout"]}")
-            jobid = output["stdout"].split('\n')[1]
-            jobid = jobid.split()[1]
+                                   Return code: {output["return_code"]}. Stdout: {stdout}. \
+                                   Stderr: {output["stderr"]}")
+            jobid = _parse_submit_job_id(stdout)
+            if jobid is None:
+                # Bohrium sometimes prints "Submit job succeed." together with
+                # "JobId: 0" for a submission it actually rejected.  Never
+                # persist that value: the polling loop could never query it.
+                logger.error(f"Bohr reported a successful submission for "
+                             f"{setting.job_name}, but returned no valid JobId. "
+                             f"Stdout: {stdout!r}. Stderr: {output['stderr']!r}")
+                raise RuntimeError(
+                    f"Bohr returned no valid JobId for job {setting.job_name}. "
+                    f"Stdout: {stdout!r}")
             logger.info(f"Job is submitted to bohr, with jobid {jobid}.")
             return jobid
         except Exception as e:
