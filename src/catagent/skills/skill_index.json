@@ -2,146 +2,146 @@
     {
         "name": "dpa4",
         "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/dpa4/skill.md",
-        "summary": "Skill for the DPA4 machine-learning force field (deepmd-kit 3.1.2 / DPA4-Neo-OMat24-v20260805.pt), covering how to finetune it and how to deploy it in ASE and LAMMPS. It explains the `dp` input/output file formats (HDF5 dataset, JSON input, .pt checkpoints, lcurve.out, .pt2 frozen model, and evaluation .out files), the three-step finetune \u2192 freeze \u2192 test workflow, and the required version match between checkpoint and JSON files. Guidance is given on choosing `training_natoms` (target 50\u201375 steps per epoch), epochs (50 typical), and learning rates, plus using the frozen .pt2 in an ASE NEB example and via LAMMPS `pair_style deepmd` (with required `atom_modify map yes`, type_map ordering, and MPI multi-GPU launch). Scripts assist with dataset conversion, JSON generation, and atom-count statistics.",
+        "summary": "Skill for finetuning and deploying the DPA4 (DeepMD) machine-learning force field using deepmd-kit 3.1.2. It covers the dp workflow: converting datasets to HDF5, generating the version-matched input.json, finetuning from a pre-trained checkpoint, freezing to .pt2, and evaluating on datasets. It also explains how to use the frozen .pt2 model in ASE (e.g. NEB calculations) and LAMMPS via pair_style deepmd, including the required `atom_modify map yes` and multi-GPU MPI launch. Input/output file formats (*.hdf5, *.json, *.pt, *.pt2, lcurve.out, *.out) are documented. A quick formula relates n_structures and mean_natoms to training_natoms so that epochs contain 50-75 steps.",
         "references": [
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/dpa4/references/job_submission.md",
-                "purpose": "Job submission file template, usable only on StepNode."
+                "purpose": "Template for job submission, intended only for StepNode."
             }
         ],
         "scripts": [
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/dpa4/scripts/extxyz_to_hdf5.py",
-                "purpose": "Converts an extxyz structure file into the HDF5 dataset format required by `dp` (usage: extxyz_to_hdf5.py <path_to_extxyz> <path_to_hdf5>)."
+                "purpose": "Convert an extxyz structure file into HDF5 dataset format required by dp (usage: python3 extxyz_to_hdf5.py <path_to_extxyz> <path_to_hdf5>)."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/dpa4/scripts/get_input_json.py",
-                "purpose": "Generates the input.json file for `dp` finetuning/training, taking options such as --training_data_path and --training_natoms; only compatible with the DPA4-Neo-OMat24-v20260805.pt checkpoint version."
+                "purpose": "Generate the input.json file for dp finetuning/training, taking training data paths and training_natoms etc.; only compatible with checkpoint version DPA4-Neo-OMat24-v20260805.pt."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/dpa4/scripts/mean_natoms.py",
-                "purpose": "Prints the mean number of atoms per structure and the total number of structures in an HDF5 dataset, used to pick training_natoms and compute steps per epoch (usage: mean_atoms.py --hdf5 data.hdf5)."
+                "purpose": "Print the mean number of atoms per structure and the total number of structures in an HDF5 dataset, used to pick an appropriate training_natoms (usage: python3 mean_natoms.py --hdf5 data.hdf5)."
             }
         ]
     },
     {
         "name": "mlff-active-learning",
         "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/mlff-active-learning/skill.md",
-        "summary": "This skill describes an iterative active-learning loop for obtaining a high-precision machine learning force field (MLFF) by finetuning a pre-trained model: sample structures & label them with DFT \u2192 finetune the MLFF \u2192 resample from the finetuned model, repeating until target accuracy is reached. For catalysis it builds the initial dataset by rattling IS/FS/NEB-path structures and running batch single-point DFT, then finetunes DPA4 (extxyz \u2192 hdf5 \u2192 input.json \u2192 dp train --finetune \u2192 freeze \u2192 test), runs structure relaxation/NEB with the MLFF, and extracts structures from failed or overly long trajectories for further DFT labelling. For general systems (MD, EOS) the workflow is simpler: rattle the cell and positions, run NPT MD with the pre-trained model, extract frames, label by DFT, and finetune. Finetuning should always restart from scratch with the accumulated datasets, active learning should be done separately per system (by element composition/chemical properties), and each step should live in its own iteration directory with report.md/state.md tracking passed and failed reactions.",
+        "summary": "This skill describes how to obtain a high-precision machine learning force field (MLFF) via finetuning and active learning, primarily targeting catalysis computations with DPA/DeepMD. The core loop is sampling & DFT labelling, finetuning the MLFF, then MLFF-driven relaxation/NEB or MD, repeating until trajectories converge within reasonable step counts (no more structures extractable). It details a catalysis workflow (build initial dataset by rattling IS/FS and NEB paths, finetune DPA4, run relaxation/NEB, check trajectories, iterate) and a simpler general-system workflow for MD/EOS studies. It also advises separate finetuning per system (by element composition/chemistry) and provides file/state management guidance using step directories plus report.md and state.md. Iterating always refinetunes from scratch so all datasets share equal epoch coverage.",
         "references": [],
         "scripts": [
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/mlff-active-learning/scripts/check_traj.py",
-                "purpose": "Inspects a relaxation/NEB (or MD) trajectory and extracts structures from it when the run looks problematic (too many steps / wandering atoms); writes geometry-only extxyz without MLFF labels, supports --neb, --nstep_thres, -n, --seed, --sample, --nimages, and exits 1 on broken input, 0 when nothing needs extraction."
+                "purpose": "Inspect a relaxation/NEB/MD trajectory; if it is problematic (too long or unconverged), extract structures from it (with options like -n number of structures, --neb to ignore fixed IS/FS endpoints, --nstep_thres threshold) for subsequent DFT labelling."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/mlff-active-learning/scripts/gather_dft_results.py",
-                "purpose": "Collects converged (|dE| < EDIFF), deduplicated ionic steps from OUTCARs into a single extxyz training dataset, with options for first/last/random step selection, reproducible seeds, and deduplication distance/metric."
+                "purpose": "Collect the computed (DFT single-point) structures into a single extxyz file to form the training dataset."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/mlff-active-learning/scripts/rattle_configs.py",
-                "purpose": "Perturbs atomic positions (and optionally the cell with -c) of input structures to generate rattled configurations, enlarging the configuration space of the training set."
+                "purpose": "Perturb (rattle) atomic positions and optionally the cell (-c) of input structures to enlarge the configuration space covered by the training dataset."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/mlff-active-learning/scripts/run_ase_neb_with_dpa.py",
-                "purpose": "Runs fixed-cell structure relaxation (opt) and NEB (neb) with a DPA force field, writing result structures plus *_opt/*_neb state json and trajectory files; supports bond-length constraints, adsorbate index checks, and NEB from IS/FS or from an existing path."
+                "purpose": "Run structure relaxation (fixed cell, with optional bond-length constraint and adsorbate-index checks) or NEB using an ASE/DPA force field, producing result structures plus a state .json and .traj files to record convergence status."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/mlff-active-learning/scripts/run_ase_npt_md_with_dpa.py",
-                "purpose": "Runs structure relaxation with a relaxable cell and NPT molecular dynamics with a DPA MLFF at given temperature, pressure, timestep, number of steps and log interval, used to sample configurations for the general-system workflow."
+                "purpose": "Run structure relaxation (relaxable cell) and NPT molecular dynamics with a DPA MLFF at specified temperature/pressure, timestep, and step counts for sampling."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/mlff-active-learning/scripts/sort_elements.py",
-                "purpose": "Sorts the elements in a POSCAR file, needed after ASE .repeat() because it does not reorder atoms automatically."
+                "purpose": "Sort the elements of a POSCAR file (needed after e.g. ase .repeat() which does not preserve element ordering)."
             }
         ]
     },
     {
-        "name": "nebkit",
-        "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/nebkit/skill.md",
-        "summary": "Nebkit is a developing Python package for structure building and reaction network generation for NEB transition-state searches. Given reactants and products, `ReactionSystem.generate_elementary_steps()` enumerates elementary steps graph-theoretically (one bond change per step), with constraints via ntimes, max/min total atoms, per-element max/min atoms, and `forbidden_pattern` substructures. Networks can be edited with `merge_reactions()`, `delete_reactions()`, and `delete_species()`, visualized via `render_system()` and dumped with `dump_info()` (writes a JSON plus an `intermediates.extxyz` with intermediate 3D structures). Structure building on surfaces is supported by `.bind_to_surfaces()`, `bind_ini_fin_to_surface()`, `bind_single_ads_to_surface()`, and `build_surface_neb_path()`, which auto-match atomic indices and align fragment orientations. A human-in-the-loop workflow is prescribed: pause to ask the user about network constraints, review and edit the generated network, confirm completion before binding structures, and ask which surface configuration to use for complex surfaces.",
+        "name": "stepnode-tools",
+        "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/stepnode-tools/skill.md",
+        "summary": "StepNode tools are organized into tool collections accessed via `get_tool_collection_infos` and `load_tool_collection`. The `structure_building_tools` collection builds initial/final states, adsorption structures, and initial NEB paths on surfaces. The `reaction_system_tools` collection generates, edits, and visualizes reaction networks, with several Human-In-The-Loop (HITL) tools that pause the agent to collect arguments. The workflow involves creating a reaction system, generating elementary steps, iteratively editing (deleting species/reactions, merging reactions) with user inspection via rendered PNGs, then dumping, binding to a surface, and deleting the system. No standalone scripts or reference files accompany this skill.",
         "references": [],
         "scripts": []
     },
     {
         "name": "structure-building",
         "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/structure-building/skill.md",
-        "summary": "This skill covers building simple molecular, bulk, and slab (surface) structures using ase, pymatgen, and rdkit, plus format conversion between structure files (e.g., VASP/OUTCAR, POSCAR, cif, extxyz). Its main rules are: atoms must not crowd together (use ase.data covalent radii as a reference for reasonable interatomic distances), molecules must not dissociate in vacuum (only on catalyst sites), and for NEB the atomic indices must match and fragment orientations must be aligned. Beyond these requirements, initial structures need not be physically precise, since subsequent DFT/MLFF relaxation fixes details (e.g., randomly placing 10-20 H2O above a slab then quick-relaxing). It notes that the \"nebkit\" skill can directly generate non-crowded, index-matched IS/FS structures for NEB.",
+        "summary": "This skill demonstrates building simple structures with ase and pymatgen, noting that these libraries only cover simple/standard cases and complex cases should use specialized tools or user-provided structures. It covers format conversion between structure file types (e.g., OUTCAR to extxyz via ase, POSCAR to cif via pymatgen). It shows building molecules from chemical formula, SMILES string, or molecular graph, and building simple bulk crystals with ase.build.bulk. It also covers building slabs/surfaces by ase (fcc100/110/111/211, bcc100/110/111, hcp0001, hcp10m10) or by pymatgen for complex slabs, warning that pymatgen tends to build tilted slabs so ase is preferred for simple fcc/hcp/bcc cases. Three wrapper scripts are provided in the scripts dir.",
         "references": [],
         "scripts": [
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/structure-building/scripts/build_molecule.py",
-                "purpose": "Build a molecule from a chemical formula, a SMILES string (optionally with --addH), or an explicit molecular graph (--vertexes/--edges); outputs e.g. POSCAR or xyz."
+                "purpose": "Builds a molecule from a chemical formula, a SMILES string, or a molecular graph (with --vertexes and --edges)."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/structure-building/scripts/build_slab.py",
-                "purpose": "Build slabs/surfaces, either simple ones via ase (fcc100/110/111/211, bcc100/110/111, hcp0001, hcp10m10 with size and fixed-layer options) or complex ones from a bulk structure via pymatgen Miller indices and ab/c sizes."
+                "purpose": "Builds a slab/surface, either a simple one via ase (-e element, -f facet, -s size, -v vacuum, --nfix) or a complex one from a bulk structure via pymatgen (--bulk, --miller, --size_ab, --size_c, --size_fix)."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/structure-building/scripts/conv_prim.py",
-                "purpose": "Convert a structure between conventional cell and primitive cell (--conv for conventional-to-primitive, --prim for primitive-to-conventional)."
+                "purpose": "Converts between a conventional cell and a primitive cell (--conv to go to primitive, --prim to go to conventional)."
             }
         ]
     },
     {
         "name": "ts-search",
         "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/skill.md",
-        "summary": "Provides instructions for locating transition states (first-order saddle points) on potential energy surfaces using VASP (compiled with VTST) and ASE. Covers PES interpolation via NEB and PES walking via Dimer: building and relaxing IS/FS structures with matched atom indices, interpolating an initial path, tuning VTST/ASE optimizers (IOPT=7 FIRE, IOPT=1 LBFGS, IBRION=1 RMM-DIIS, k=0.1 + improvedtangent + climb for ASE), and practical tips such as preconvergence, image counts/spacing limits, and re-interpolation from higher-energy images. Also explains converting NEB results into Dimer inputs (MODECAR), validating convergence via max forces, and performing frequency analysis (fixing slab atoms, extracting imaginary modes, computing vibration free energy) to verify the single imaginary mode of a true TS.",
+        "summary": "This skill provides instructions for locating transition states (TS) on the potential energy surface using VASP (compiled with VTST) and ASE. It covers two main approaches: PES interpolation via NEB (building and relaxing an initial minimum energy path between initial and final states, using scripts like neb_make.py, with detailed VASP INCAR tags and optimizer choices such as IOPT=7/FIRE, IOPT=1/LBFGS, IBRION=1/RMM-DIIS, plus ASE/MLFF workflows), and PES walking via Dimer (which requires a TS guess and MODECAR typically generated from NEB results with neb2dim.py). It also describes practical wisdom such as system complexity assessment, re-interpolation of distorted paths, and frequency analysis to compute vibration free energy and validate the TS. Related scripts handle NEB path generation, force/energy reporting, slab atom fixing, vibration mode extraction, and structure distance calculation.",
         "references": [
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/references/job_submission.md",
-                "purpose": "File template for job submission, only for StepNode."
+                "purpose": "File template for job submission, only for StepNode"
             }
         ],
         "scripts": [
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/scripts/dist.py",
-                "purpose": "Calculate the distance between two structures."
+                "purpose": "Calculate the distance between two structures"
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/scripts/fix_slab_atoms.py",
-                "purpose": "Fix the slab atoms' positions (keeping only adsorbate indices free) prior to frequency analysis."
+                "purpose": "Fix the slab atoms for frequency analysis, using --relax_ind to specify which atoms are allowed to relax"
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/scripts/get_virb_free_energy.py",
-                "purpose": "Calculate vibration free energy from the OUTCAR of a frequency analysis, with optional temperature and isotope-mass settings."
+                "purpose": "Calculate vibration free energy from the OUTCAR of a frequency analysis, with temperature (-t) and isotope options"
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/scripts/get_virb_mode.py",
-                "purpose": "Print the vibrational wavenumbers and extract a specific vibration mode from OUTCAR into a mode_i file (by default the highest-energy imaginary mode, usable as MODECAR for Dimer)."
+                "purpose": "Print the wavenumbers of vibration modes and extract a specific vibration mode into a mode_i file (usable as MODECAR for Dimer)"
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/scripts/neb2dim.py",
-                "purpose": "Convert NEB results into the inputs for a Dimer calculation (initial TS guess plus MODECAR) in a dim_input directory."
+                "purpose": "Convert the results of an NEB calculation to the inputs of a Dimer calculation"
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/scripts/nebef.py",
-                "purpose": "Print the max force, DFT energy and relative energy of each NEB image to judge whether the path is close to the MEP."
+                "purpose": "Print the max force, DFT energy and relative energy of NEB images"
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/ts-search/scripts/neb_make.py",
-                "purpose": "Interpolate between the relaxed IS and FS structures to generate an initial NEB path, producing numbered 0x image directories for VASP NEB (or an extxyz path file)."
+                "purpose": "Interpolate between relaxed IS and FS structures to generate an initial NEB path (with nimages or spacing options)"
             }
         ]
     },
     {
         "name": "vasp",
         "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/vasp/skill.md",
-        "summary": "This skill provides general guidance for running VASP calculations, covering the four basic input files (INCAR, POSCAR, KPOINTS, POTCAR) and recommended settings for precision, electronic algorithms, geometry optimization, smearing, spin polarization, DFT+U, and vdW corrections. It explains k-point selection for slabs, molecules, and bulk systems, and offers practical tips such as keeping INCAR minimal, maintaining consistent settings, and using staged low-precision calculations to aid convergence. Before finalizing inputs, users should be asked to confirm INCAR tags and any costly settings.",
+        "summary": "Provides general knowledge of VASP usage, focusing on the four basic input files (INCAR, POSCAR, KPOINTS, POTCAR) and practical calculation guidance. Covers INCAR settings for precision, electronic algorithm (ALGO), geometry optimization (IBRION/ISIF/POTIM), smearing (ISMEAR/SIGMA), and advanced options (ISPIN, LDAU, IVDW) that require user confirmation. Explains KPOINTS construction rules (inverse proportion to lattice length, gamma-only for molecules, KSPACING for bulk) and POTCAR selection/assembly via scripts. Includes practical tips: minimize INCAR tags, pause for user review, keep LWAVE/LCHARG false, maintain consistent tags, and use staged low-precision calculations to reach convergence.",
         "references": [
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/vasp/references/job_submission.md",
-                "purpose": "Provides a job-submission file template intended only for StepNode."
+                "purpose": "File template for job submission, usable only for StepNode."
             }
         ],
         "scripts": [
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/vasp/scripts/generate_kpoints.py",
-                "purpose": "Generates a KPOINTS file for normal calculations and band-structure calculations; use -h for help."
+                "purpose": "Generate a KPOINTS file for normal or band structure calculations."
             },
             {
                 "path": "/mnt/t/programming/myagents/cat-agent-dev/catagent/skills/vasp/scripts/recommend_potcar.py",
-                "purpose": "Prints the recommended POTCAR names for a given list of elements, e.g. python3 recommend_potcar.py -e \"Na, K, Rh, Cd, Ga, Fe\"."
+                "purpose": "Print recommended POTCAR names for given elements (e.g. via -e option)."
             }
         ]
     }

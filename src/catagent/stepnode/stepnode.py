@@ -180,7 +180,7 @@ def create_model_and_tool_node(model:BaseChatModel,
                       job_manager_url:str,
                       http_client:httpx.AsyncClient):
     
-    static_tools, tool_node = get_tool_node(job_manager_url, http_client)
+    static_tools, tool_node = get_tool_node(model, job_manager_url, http_client)
     system_prompt = ""
     for skill_path in system_skill_pathes:
         with open(skill_path, mode="r") as f:
