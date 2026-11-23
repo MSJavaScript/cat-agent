@@ -25,9 +25,10 @@ catagent = "catagent._entrypoint:main"
 
 [tool.setuptools]
 include-package-data = true
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["catagent*"]
 exclude = [
     "catagent.jobmanager.demo*",

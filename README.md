@@ -15,27 +15,31 @@ invariants you must preserve when changing the code.
 
 ## Installation
 
+Requires Python 3.10 or newer. A virtual environment is recommended:
+
 ```bash
-./install.sh                  # current Python environment
-./install.sh --user           # ~/.local, no root
-./install.sh --venv .venv     # create a virtualenv and install there
-./install.sh --editable       # editable install for development
-./install.sh --no-deps        # dependencies are already installed
+python -m venv .venv
+source .venv/bin/activate
+pip install .
 ```
 
-The script installs the dependencies declared in `pyproject.toml` and a
-`catagent` console script. Everything runtime-related is a single installable
-package: after installation, the interpreter's site-packages contains only
-`catagent/`, with `jobmanager`, `tools`, `libs` and `skills` nested inside it.
+Use `pip install -e .` for an editable development install, `pip install --user .`
+to install into `~/.local` without root, or `pip install --no-deps .` when the
+dependencies are already installed.
+
+The install adds the dependencies declared in `pyproject.toml` and a `catagent`
+console script. Everything runtime-related is a single installable package: after
+installation, the interpreter's site-packages contains only `catagent/`, with
+`jobmanager`, `tools`, `libs` and `skills` nested inside it.
 
 Only runtime files are installed: the development directories
 (`ai-changes/`, `check/`, `learn/`, `recycle/`),
-`catagent/jobmanager/demo/`, all `.env` files and
-`catagent/jobmanager/jobmanager_config.json` are excluded.
+`src/catagent/jobmanager/demo/`, all `.env` files and
+`src/catagent/jobmanager/jobmanager_config.json` are excluded.
 Jobmanager configuration and model credentials are therefore always supplied by
-the user. If an older version left top-level `jobmanager/`, `skills/`, `tools/`
-or `libs/` modules behind, the installer removes them when they carry this
-project's marker files.
+the user. If an older version of cat-agent left top-level `jobmanager/`,
+`skills/`, `tools/` or `libs/` packages in site-packages, remove them so they do
+not shadow the modules now bundled inside `catagent`.
 
 The skills directory is part of the package, so `--skill-index-json` is
 optional. Override it with the flag or with `CATAGENT_SKILL_INDEX` when using a
@@ -47,7 +51,7 @@ different skill set.
 
 ```bash
 # 1. Install cat-agent and the `catagent` command (see Installation)
-./install.sh
+pip install .
 
 # 2. Model credentials (create .env; see Configuration)
 # MODEL_NAME=...
@@ -72,9 +76,8 @@ The checkpoint database is created automatically. `catagent --help`,
 ## Repository layout
 
 ```text
-catagent/
+src/catagent/
 ├── agent.py                  Outer workflow: builds and wires the main graph.
-├── run_agent.py              Standalone generic LangGraph streamer helper.
 ├── _args.py                  Argument parsers (dependency-light, shared).
 ├── _paths.py                 Locates the bundled skills index.
 ├── _entrypoint.py            Entry point for the installed `catagent` command.
@@ -120,7 +123,6 @@ catagent/
 
 check/                        Fast deterministic tests + full e2e test harness.
 learn/                        Self-contained runnable demos of internal mechanisms.
-install.sh                    Installs dependencies and the `catagent` command.
 pyproject.toml, MANIFEST.in   Packaging: one `catagent` package, dev dirs excluded.
 ```
 
