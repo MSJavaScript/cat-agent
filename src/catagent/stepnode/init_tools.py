@@ -254,12 +254,13 @@ def get_workdir(runtime:ToolRuntime[StepNodeContext]):
     return runtime.context["step_workdir"]
 
 async def tool_call_wrapper(request:ToolCallRequest, handler):
-    ask_arg_tool_msgs = {
-        "generate_elementary_steps": "Please set the constraint condition to limit the number of reactions.",
-        "delete_species": "Please input the indices of intermediate species you want to delete, separated by commas.",
-        "delete_reactions": "Please input the indices of reactions you want to delete, separated by commas.",
-        "merge_reactions": "Please input the index pairs of reactions you want to merge, the format is: (id1, id2), (id3, id4)."
-    }
+    # ask_arg_tool_msgs = {
+    #     "generate_elementary_steps": "Please set the constraint condition to limit the number of reactions.",
+    #     "delete_species": "Please input the indices of intermediate species you want to delete, separated by commas.",
+    #     "delete_reactions": "Please input the indices of reactions you want to delete, separated by commas.",
+    #     "merge_reactions": "Please input the index pairs of reactions you want to merge, the format is: (id1, id2), (id3, id4)."
+    # }
+    ask_arg_tool_msgs = dict() # 不再拦截这些函数调用，让stepnode自己调用pause_to_ask暂停
     req = request
     if req.tool is None:
         requested_name = req.tool_call["name"]

@@ -13,7 +13,7 @@ def build_ini_fin_structures_on_surface(ini_fragments:List[str],
                                        surface:str,
                                        save_path:str) -> dict:
     '''
-    Build the adsorption configurations of initial and final states for NEB calculation. Automatically handle the matching of atomic indices, alignment of initial and final atomic positions, and traversal of surface adsorption sites. Generate three files: `ini_states.extxyz` and `fin_states.extxyz` containing the initial and final configurations, `adsorbate_atomic_indices.dat` containing the atomic indices of adsorbate.
+    Build IS and FS for NEB calculation. Automatically match atomic indices and align molecular fragments. All surfaces sites will be considered according to the local chemical environments. Generate three files: `ini_states.extxyz` and `fin_states.extxyz` containing the initial and final configurations, `adsorbate_atomic_indices.dat` containing the atomic indices of adsorbate (this is useful when you want to fix slab atoms, `build_nebpath_on_surface` tool requires this file).
 
     Use this tool if only a few NEB calculations are needed. If you want to calculate a chemical system, use reaction system tools to generate the reaction network and build adsorption configurations.
 
@@ -56,13 +56,13 @@ def build_ini_fin_structures_on_surface(ini_fragments:List[str],
 
 @tool 
 def build_nebpath_on_surface(save_path: str,
-                                      ini_state_path: str,
-                                      fin_state_path: str,
-                                      adsorbate_indices_path: str,
-                                      image_spacing: float = 0.5,
-                                      n_images: int = None):
+                            ini_state_path: str,
+                            fin_state_path: str,
+                            adsorbate_indices_path: str,
+                            image_spacing: float = 0.5,
+                            n_images: int = None):
     '''
-    Make interpolation between relaxed IS and FS to get an initial NEB path. Automatically handle some structure problems, such as molecular dissociation in vacuum and surface atomic movement. Generate a `nebpath.extxyz` file containing the initial neb path.
+    Make interpolation between relaxed IS and FS to get an initial NEB path. Automatically handle some structure problems, such as molecule dissociation in vacuum and surface atomic movement. Generate a `nebpath.extxyz` file containing the initial neb path.
 
     Args:
         save_path: Absolute path to save the `nebpath.extxyz`.

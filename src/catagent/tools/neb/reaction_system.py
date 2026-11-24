@@ -91,7 +91,7 @@ class ReactionSystemToolSets:
             json_log_path: str,
             visualization_dir: str):
             '''
-            Create a `ReactionSystem` object. A molecule should only appear one time. For example, for reaction "N2 + 3*H2 <-> 2*NH3", just call this tool by `reactants_mol_pathes=['/path/to/N2.xyz', '/path/to/H2']` and `products_mol_pathes = ['/path/to/NH3']`. 
+            Create a `ReactionSystem` object. A molecule should only appear one time. For example, for reaction "N2 + 3*H2 <-> 2*NH3", just call this tool by `reactants_mol_pathes=['/path/to/N2.xyz', '/path/to/H2.xyz']` and `products_mol_pathes = ['/path/to/NH3.xyz']`. 
             Args:
                 system_name: A short name of the reaction system, e.g. 'CO2,CH4->CO,H2,H2O'.
                 reactants_mol_pathes: Path to reactant molecules files (usually in `.xyz` format).
@@ -169,15 +169,25 @@ class ReactionSystemToolSets:
             min_natoms:Dict[str, int] = None, 
             forbidden_pattern: List[Tuple[str, str]] = None):
             '''
-            Generate elementary steps (reactions), `create_reaction_system` should be called firstly to create a `ReactionSystem` object. This is a human-in-the-loop (HITL) tool.
+            NOTE: You should firstly call `pause_to_ask` to ask the user to specify the args of this tool.
+
+            Generate intermediate species and elementary steps satisfying certain constraints. Generate two files: a json file containing the information of reaction system and a `intermediates.extxyz` file containing all the species. The json file has 3 fields:
+            - n_reactions: The number of reactions.
+            - n_species: The number of intermediate species.
+            - reactions: A dict list, contains information of each reaction.
+                - id: Id of reaction.
+                - reac_str: The string representation of reaction.
+                - reactant_indices: The indices of reactants in `intermediates.extxyz`
+                - product_indices: The indices of products.
+
             Args:
                 system_name: Name of the reaction system, the corresponding `ReactionSystem` object should be created in advance.
-                ntimes: `ntimes = -1` (default) use BFS to find all possible elementary steps. `ntimes > 0` sample the elementary steps n times using DFS.
+                ntimes: `ntimes = -1` (default) use BFS to find all possible elementary steps. `ntimes > 0` sample the elementary steps n times using DFS (usually fail).
                 max_natoms_tot: Max number of atoms in the intermediates. `-1` means no limitation.
                 min_natoms_tot: Min number of atoms in the intermediates.
                 max_natoms: A `dict` used to limit the max number of atoms of each element in the intermediates. If omitted, a default value is calculated from the final products.
                 min_natoms: A `dict` used to limit the min number of atoms of each element in the intermediates.
-                forbidden_pattern: A list of forbidden substructures represented by molecular graph, e.g., `('H,O,C,O,H','0-1,1-2,2-3,3-4')` represents geminal diol. If omitted, a list of default patterns are generated.
+                forbidden_pattern: A list of forbidden substructures represented by molecular graph, e.g., `('H,O,C,O,H','0-1,1-2,2-3,3-4')` represents geminal diol; `('C,O,O', '0-1,1-2')` represents a "C-O-O" sub-structure. If omitted, a list of default patterns are generated.
             '''
             stepnode_thread_id:str = runtime.config.get("configurable", {}).get("thread_id") 
             thread_id = stepnode_thread_id[0:stepnode_thread_id.find(':') ] 
@@ -185,15 +195,16 @@ class ReactionSystemToolSets:
                   (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
             rs = this.reactions_systems[thread_id][system_name]
-            rs.generate_elementary_steps(ntimes=ntimes,
+            flag, msg = rs.generate_elementary_steps(ntimes=ntimes,
                                          max_natoms_tot=max_natoms_tot,
                                          min_natoms_tot=min_natoms_tot,
                                          max_natoms=max_natoms,
                                          min_natoms=min_natoms,
                                          forbidden_pattern=forbidden_pattern)
-            
-            msg = rs.dump_info(rs.json_log_path)
-            return f"{len(rs.reactions_list)} reactions are generated. Call `render` to visualize the reactions. {msg}"
+            if not flag:
+                return msg
+            msg_dump = rs.dump_info(rs.json_log_path)
+            return f"{msg}\n{msg_dump}\nCall `render` to visualize the reactions."
 
 
         @tool
@@ -201,7 +212,9 @@ class ReactionSystemToolSets:
                            system_name: str, 
                            species_indices: List[int] = []):
             '''
-            Delete intermediate speices from the system. Related reactions will also be deleted. This is a human-in-the-loop (HITL) tool.
+            NOTE: You should firstly call `pause_to_ask`  to ask user for the species indices they want to delete.
+
+            Delete intermediate speices from the system. Related or isolated reactions will also be deleted. Reactions and species indices will change after deletion. If you want to call this tool again, please tell the user new indices. Json log file and intermediates.extxyz will be updated.
             Args:
                 system_name: Name of the reaction system.
                 species_indices: Indices of intermediate speices.
@@ -214,8 +227,7 @@ class ReactionSystemToolSets:
                     (not system_name in this.reactions_systems[thread_id]):
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
             rs = this.reactions_systems[thread_id][system_name]
-            for i in species_indices:
-                rs.delete_species(i)
+            rs.delete_species(species_indices)
             msg = rs.dump_info(rs.json_log_path)
             return f"Intermediates {species_indices} are deleted. {msg}"
 
@@ -224,7 +236,9 @@ class ReactionSystemToolSets:
                              system_name: str, 
                              reaction_indices: List[int] = []):
             '''
-            Delete reactions from the system. Related intermediate speices will also be deleted. This is a human-in-the-loop (HITL) tool.
+            NOTE: You should firstly call `pause_to_ask`  to ask user for the reaction indices they want to delete.
+
+            Delete reactions from the system. If reactions which are not in `reaction_indices` become isolated, they will be automatically deleted, related intermediate species will also be deleted. Reactions and species indices will change after deletion. If you want to call this tool again, please tell the user new indices. Json log file and intermediates.extxyz will be updated.
             Args:
                 system_name: Name of the reaction system.
                 reaction_indices: Indices of reactions. 
@@ -249,7 +263,9 @@ class ReactionSystemToolSets:
                             system_name: str, 
                             reaction_index_pairs: List[Tuple[int, int]] = []):
             '''
-            Merge reactions in the system. This is a human-in-the-loop (HITL) tool.
+            NOTE: You should firstly call `pause_to_ask`  to let the user set reaction indices pairs they want to merge.
+
+            Merge reactions in the system. Json log file and intermediates.extxyz will be updated.
             Args:
                 system_name: Name of the reaction system.
                 reaction_index_pairs: A list of tuples, each tuple contains the indices of reactions need to be merged. 
@@ -276,7 +292,24 @@ class ReactionSystemToolSets:
                             surface_structures_path:List[str],
                             cwd:str = None):
             '''
-            Build initial and final states (in POSCAR format) of elementary reactions on the given surfaces. The result will be put in dirs `surface_<surface_index>/reaction_<reaction_index>` and will be named by `POSCAR_<state>_<conf_index>`. Here `<state>` is `ini` for `fin`, `<conf_index>` is the index of configuration.
+            Build initial and final states (in POSCAR format) of elementary reactions on the given surfaces. Atomic indices are automatically matched, fragments are aligned. 
+            
+            Structure files will be put in dirs `surface_<surface_index>/reaction_<reaction_index>` and will be named by `POSCAR_<state>_<conf_index>`. Here `<state>` is `ini` for `fin`, `<conf_index>` is the index of configuration.
+            This tool also generate two json files:
+
+            1. binding_info.json: this json has 3 fields:
+                - surface_structure: Path to surface structure.
+                - n_reactions: The number of reactions
+                - reactions_info: A list of dict, each dict has 2 fields:
+                    - reaction_string: String representation of a reaction.
+                    - ads_atom_indices: The atomic indices of adsorbate atoms.
+            2. intermediate_index.json: this json contains a dict, key is the smiles string of an intermediate species, value is a 3-elements tuple: (ir, 0/1, list) 
+                - First element: The index of reaction which contains this species.
+                - Second element: 0 or 1. 0 means this species is reactant, 1 means this species is product.
+                - Third element: A list of int. These are the indices of structures, see below.
+            Only species that appear alone on one side of at least one reaction are included. Species that only appear together with another fragment (i.e. co-adsorbed species) are not included, these are usually single atom adsorbates such as C, H and O, you can build them by `build_adsorption_configs_on_surface` tool. 
+            Because there are usually more reactions than intermediates. For example, CO can appear in reactions `CO2<->CO+O`, `CO+H<->COH` and `CO<->C+O`. For these reactions, they can use the same CO adsorption structure. We provide intermediate_index.json for convenience, to only perform calculation on the adsorption structure once, instead of calculating it for each reaction. For example, for intermediate CO, suppose the tuple is (1, 0, [0,1,2]). Then we can only perform DFT calculation on IS (the second element is 0) structures 0,1,2 of reaction 1. These are all the possible CO adsorption structures we will meet in this reaction system.
+
             Args:
                 system_name: Name of the reaction system.
                 surface_structures_path: Pathes to surface structures, should be readable to ase.
@@ -300,6 +333,7 @@ class ReactionSystemToolSets:
                 result = rs.bind_to_surfaces([surface_atoms])
                 os.makedirs(f"surface_{i}", exist_ok=True)
                 intermediate_index_dict, reactions_result_list = result[0]
+
                 info["n_reactions"] = len(reactions_result_list)
                 reactions_info = []
                 for j, reac in enumerate(reactions_result_list):
@@ -316,10 +350,12 @@ class ReactionSystemToolSets:
                 info["reactions_info"] = reactions_info
                 with open(f"surface_{i}/binding_info.json", mode="w") as f:
                     json.dump(info, f, indent=4)
+                with open(f"surface_{i}/intermediate_index.json", mode="w") as f:
+                    json.dump(intermediate_index_dict, f, indent=4) 
             if cwd:
                 os.chdir(old_wd)
 
-            return f"The POSCARs initial and final states are written to `surface_*` dirs in {cwd if cwd else old_wd}. `surface_*/binding_info.json` contains the smiles string of each reaction and the indices of adsorbate atoms."
+            return f"The POSCARs initial and final states are written to `surface_*` dirs in {cwd if cwd else old_wd}."
 
             
         return [dump, load_from_file, has_reaction_system, delete_reaction_system, 
