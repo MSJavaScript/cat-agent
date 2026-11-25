@@ -156,7 +156,10 @@ def _file_policy_error(
 
 
 @tool
-async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: Optional[str] = None, timeout: int = 60) -> dict:
+async def execute_shell(runtime:ToolRuntime[Any], 
+                        command: str,  
+                        cwd, 
+                        timeout: int = 60) -> dict:
     """
     Execute a shell command. Tips: Use `cat`, `head`, `grep`, `sed`, `awk` or `echo` etc. to quickly read or edit files. 
     Args:
@@ -164,14 +167,11 @@ async def execute_shell(runtime:ToolRuntime[Any], command: str,  cwd: Optional[s
         cwd: Current working directory. Defaults to the step workdir (the project workdir for the orchestrator).
         timeout: Time limit for command execution (in seconds).
     """
-    if cwd is None:
-        cwd = (_context_value(runtime, "step_workdir")
-               or _context_value(runtime, "project_workdir"))
-    if not cwd:
+    if not cwd or not os.path.isdir(cwd):
         return Command(update={
             "messages": [ToolMessage(
                             status="error",
-                            content="Error: no workdir is available for this run.",
+                            content=f"Error: {cwd} is not a valid workdir.",
                             tool_call_id=runtime.tool_call_id,
                             name="execute_shell"
                         )]

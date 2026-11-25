@@ -253,8 +253,7 @@ class ReactionSystemToolSets:
                 raise KeyError(f"{system_name} dose not exist. Check the system name or create it.")
             rs = this.reactions_systems[thread_id][system_name]
             index = sorted(reaction_indices, reverse=True)
-            for i in index:
-                rs.delete_reaction(i)
+            rs.delete_reactions(index)
             msg = rs.dump_info(rs.json_log_path)
             return f"Reactions {reaction_indices} are deleted. {msg}"
 

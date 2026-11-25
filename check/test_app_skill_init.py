@@ -28,7 +28,7 @@ from catagent.app.skills import load_skill_index
 from check.scripted_model import ScriptedModel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SKILL_INDEX = REPO_ROOT / "catagent" / "skills" / "skill_index.json"
+SKILL_INDEX = REPO_ROOT / "src" / "catagent" / "skills" / "skill_index.json"
 
 
 def _skill(name: str) -> Dict[str, Any]:
@@ -146,11 +146,17 @@ async def _test_graph_seeding() -> None:
     assert command.update == {
         "loaded_skills": initial,
         "skill_artifacts_pathes": set(),
+        # `init_skills` is the first orchestrator dispatch and must own the
+        # busy flag, so the request queue cannot start a second turn.
+        "orchestrator_is_working": True,
     }
 
     command = init_node({"messages": [], "loaded_skills": {"existing": {}}})
     assert command.goto == "orchestrator_node"
-    assert command.update == {"skill_artifacts_pathes": set()}, (
+    assert command.update == {
+        "skill_artifacts_pathes": set(),
+        "orchestrator_is_working": True,
+    }, (
         "an existing thread must keep its loaded skills but still initialize "
         "the skill artifact paths"
     )
