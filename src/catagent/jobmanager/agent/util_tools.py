@@ -176,7 +176,11 @@ async def edit_file(
         end_line: End line number. `None` means the end of the line.
     '''
     if not os.path.isfile(file_path):
-        await execute_shell.ainvoke(dict(command=f"echo > {file_path}"))
+        dirname = os.path.dirname(file_path)
+        if not os.path.isdir(dirname):
+            raise NotADirectoryError(f"{dirname} is not a directory.")
+        async with aiofiles.open(file_path, mode="w") as f:
+            pass
         
     if mode == 'append':
         async with aiofiles.open(file_path, mode="a") as f:

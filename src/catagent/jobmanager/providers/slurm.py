@@ -4,7 +4,7 @@ from catagent.jobmanager.models import JobStatus, JobSetting
 
 from pydantic import BaseModel
 from typing import List, Dict, Literal, Optional, Set
-import os, logging, shlex, shutil, tempfile, threading, contextlib
+import os, logging, shlex, shutil, tempfile, threading, contextlib, re
 import asyncio,paramiko, atexit, scp 
 
 logger = logging.getLogger("jobmanager")
@@ -61,6 +61,40 @@ def run_ssh_remote_command(client:paramiko.SSHClient, command:str) -> List[List[
     except paramiko.SSHException as e:
         logger.error(f"Command {command} failed, {e}.")
         return None  
+
+
+_SBATCH_JOB_ID_RE = re.compile(r"Submitted\s+batch\s+job\s+(\d+)",
+                               re.IGNORECASE)
+_VALID_SBATCH_JOB_ID_RE = re.compile(r"[1-9]\d*")
+
+
+def _parse_submit_job_id(stdout: str) -> Optional[str]:
+    """Return the numeric job id printed by ``sbatch``.
+
+    The id is read from the ``Submitted batch job <id>`` message rather than
+    from a fixed line/token.  Login shells on some clusters print a storage or
+    MOTD banner asynchronously, so a decorative line such as
+    ``--------------------------------------------------`` can arrive
+    *after* sbatch's message.  The previous implementation took the last
+    stdout line's last token and persisted that banner as the remote id; every
+    subsequent status query then failed with ``Invalid job id``.
+
+    ``None`` means no usable id.  The caller must fail the submission instead
+    of storing a value that can never be polled.  Multiple distinct ids are
+    ambiguous because one group maps to exactly one remote job.
+    """
+    matches = _SBATCH_JOB_ID_RE.findall(stdout or "")
+    if not matches:
+        return None
+    job_ids = {str(int(value)) for value in matches}
+    if len(job_ids) > 1:
+        raise RuntimeError(
+            f"`sbatch` reported multiple job ids: {sorted(job_ids)}")
+    job_id = job_ids.pop()
+    if not _VALID_SBATCH_JOB_ID_RE.fullmatch(job_id):
+        return None
+    return job_id
+
 
 class SlurmProvider(BaseProvider):
     type: str = "slurm"
@@ -349,10 +383,20 @@ class SlurmProvider(BaseProvider):
                                                  command=command)
         if result is None:
             raise RuntimeError(f"Fail to submit job {setting.job_name} to {self.name}. SSH error.")
-        if len(result[1]) > 0:  
-            return result[1][-1].strip().split()[-1]
-        else:
-            raise RuntimeError(f"Fail to submit job {setting.job_name} to {self.name}. Error: {''.join(result[2])}")
+        stdout = "".join(result[1])
+        stderr = "".join(result[2])
+        remote_id = _parse_submit_job_id(stdout)
+        if remote_id is None:
+            logger.error(
+                f"Fail to parse the slurm job id of {setting.job_name} on "
+                f"{self.name}. stdout: {stdout!r}, stderr: {stderr!r}")
+            raise RuntimeError(
+                f"Fail to submit job {setting.job_name} to {self.name}. "
+                f"`sbatch` printed no valid job id. Stdout: {stdout!r}, "
+                f"Stderr: {stderr!r}")
+        logger.info(f"Job {setting.job_name} is submitted to {self.name}, "
+                    f"remote id {remote_id}.")
+        return remote_id
         
     async def cleanup(self, remote_dir:str):
         # 删除远端的目录

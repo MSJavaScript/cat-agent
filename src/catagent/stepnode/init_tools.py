@@ -53,7 +53,7 @@ def init_job_manager_tools(job_manager_url: str, http_client:httpx.AsyncClient):
         Submit a job to job manager.
         Args:
             job_description: Description of the job.
-            local_dir: The local workdir where the files to be submitted exist.
+            local_dir: The local workdir where the files to be submitted exist. One job_description.json and one run.sh file should exist in local_dir.
             provider_name: The name of selected provider.
             job_env_name: The name of selected job environment.
             result_patterns: The file name or wildcard of the result to be recycled. Download all the calculation results by default.

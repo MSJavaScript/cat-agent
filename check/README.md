@@ -22,6 +22,7 @@ The tests are grouped by what they exercise:
 | `test_debug_ui.py` | no | no | Bounded event log, `GET /` HTML route (including the new-thread workdir dialog), `/events/{thread_id}`, jobmanager messages, and the unchanged `POST /` callback. |
 | `test_parse_path.py` | no | no | Regex-based `parse_path` extraction from shell operators, redirects, quoted paths, Python `-c`, heredocs, and URLs/comments. |
 | `test_bohr_provider.py` | no | no (mocked CLI) | Bohr submit-id parsing (extra CLI lines, `JobId: 0`, multi-id output) and JSON status parsing. |
+| `test_slurm_provider.py` | no | no | Slurm `sbatch` job-id parsing when a login-shell banner follows the submit message. |
 | `test_checkpointer_prune.py` | no | no | SQLite checkpointer `aprune`: keep-latest/delete, per-namespace pruning, pending writes, old-format sends parents, and input validation. |
 | `test_agent_orchestrator.py` | yes | mocked HTTP | The orchestrator reads a skill, plans, and registers an append plan. |
 | `test_agent_e2e.py` | yes | yes | Full workflow: orchestrator → router → StepNode → jobmanager callback → final report. |
@@ -154,6 +155,8 @@ python -m check.test_cli_jobs
 python -m check.test_app_skill_init
 python -m check.test_debug_ui
 python -m check.test_parse_path
+python -m check.test_bohr_provider
+python -m check.test_slurm_provider
 ```
 
 Expected output:
@@ -198,6 +201,37 @@ jobs itself: `_stream_chat` is called with `register_jobs=False`, the CLI polls
 `GET /status/{job_uuid}` until `result_status` is final, and then resumes the
 graph with `{interrupt_id: {"payload": {...}}}`. The test uses a fake graph
 stream and an `httpx.MockTransport`; no jobmanager process is started.
+
+### Inspecting the jobs a jobmanager knows about
+
+`check/debug_jobs.py` is a read-only debug helper for a **running** jobmanager.
+It calls `GET /jobs` (the route in `catagent/jobmanager/server.py`) and prints
+the records as a table:
+
+```bash
+python -m check.debug_jobs --url http://127.0.0.1:8123
+```
+
+Useful options:
+
+```bash
+# full UUID plus submission/finalize state and group count
+python -m check.debug_jobs --url http://127.0.0.1:8123 --full
+
+# one extra row per sub-job (remote id, status, remote dir, error)
+python -m check.debug_jobs --url http://127.0.0.1:8123 --sub-jobs
+
+# filters, raw JSON, or a live refresh every two seconds
+python -m check.debug_jobs --status running --status failed
+python -m check.debug_jobs --provider bohr --grep water
+python -m check.debug_jobs --json
+python -m check.debug_jobs --watch 2
+```
+
+The URL defaults to `http://127.0.0.1:8000` (the CLI default) and can also be
+set with `CATAGENT_JOBMANAGER_URL`. Statuses are colored when stdout is a
+terminal (`NO_COLOR` or `--no-color` disables it). The script uses only the
+standard library, so it does not import `catagent` or start a server.
 
 ### Skill index and payload filtering
 

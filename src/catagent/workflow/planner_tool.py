@@ -428,4 +428,4 @@ def init_planner_tool(model:BaseChatModel):
                 }
             )
 
-    return [planner, get_raw_plan_content, register_raw_plan]
+    return [planner, get_raw_plan_content, register_raw_plan, delete_raw_plan]

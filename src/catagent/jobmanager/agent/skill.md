@@ -138,7 +138,7 @@ Parent agent will also assign a batch of jobs, for example, 500 VASP jobs in 500
     | high | 5-15 |
     | ultra high | < 5 |
 
-    However, if the total number of jobs is not very large (e.g. < 50), you can divide the jobs into more groups (<=10) to reducing the computation time. For platforms where computing nodes are exclusive, it is crucial to allocate the number of job groups reasonably and set the number of jobs running simultaneously (see [Slurm Provider](#slurm-provider)) on the nodes to fully utilize computing resources and shorten computation time.
+    However, if the total number of jobs is not very large (e.g. < 50), you can divide the jobs into more groups (<=20) to reducing the computation time. For platforms where computing nodes are exclusive, it is crucial to allocate the number of job groups reasonably and set the number of jobs running simultaneously (see [Slurm Provider](#slurm-provider)) on the nodes to fully utilize computing resources and shorten computation time.
 
 2. Write a bash script to make groups, below is an example.
     ```bash
