@@ -22,7 +22,7 @@ The tests are grouped by what they exercise:
 | `test_debug_ui.py` | no | no | Bounded event log, `GET /` HTML route (including the new-thread workdir dialog), `/events/{thread_id}`, jobmanager messages, and the unchanged `POST /` callback. |
 | `test_parse_path.py` | no | no | Regex-based `parse_path` extraction from shell operators, redirects, quoted paths, Python `-c`, heredocs, and URLs/comments. |
 | `test_bohr_provider.py` | no | no (mocked CLI) | Bohr submit-id parsing (extra CLI lines, `JobId: 0`, multi-id output) and JSON status parsing. |
-| `test_slurm_provider.py` | no | no | Slurm `sbatch` job-id parsing when a login-shell banner follows the submit message. |
+| `test_slurm_provider.py` | no | no | Slurm `sbatch` job-id parsing when a login-shell banner follows the submit message, state-string mapping, the `sacct` fallback for jobs purged from `scontrol`, and reconnecting a dead SSH session. |
 | `test_checkpointer_prune.py` | no | no | SQLite checkpointer `aprune`: keep-latest/delete, per-namespace pruning, pending writes, old-format sends parents, and input validation. |
 | `test_agent_orchestrator.py` | yes | mocked HTTP | The orchestrator reads a skill, plans, and registers an append plan. |
 | `test_agent_e2e.py` | yes | yes | Full workflow: orchestrator → router → StepNode → jobmanager callback → final report. |
