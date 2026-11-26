@@ -116,7 +116,7 @@
 
                 "vasp-6.3.2": {
                     "image_path": "registry.dp.tech/dptech/dp/native/prod-28882/vasp-ase:6.3.2-vtst",
-                    "softwares": ["vasp-6.3.2", "ase"],
+                    "softwares": ["vasp-6.3.2 VTST", "ase"],
                     "initialize_command": [
                         "source /opt/intel/oneapi/setvars.sh",
                         "export FI_PROVIDER=tcp"

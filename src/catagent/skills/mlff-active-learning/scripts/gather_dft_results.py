@@ -4,6 +4,12 @@ Given a source dir, gather the DFT energies and forces from OUTCARs.
 Only ionic steps whose electronic loop converged (|dE| < EDIFF) are kept, and
 near-duplicate configurations are removed before writing.
 
+The atoms of every frame are put into a canonical element order (heavy
+elements first, atoms of the same element keep their relative order), and every
+per-atom label (positions, forces, ...) is permuted together with its atom.
+A consistent element order is required by ``extxyz_to_hdf5.py``: it cannot
+merge frames of one system that list their atoms in different orders.
+
 Usage:
 # Collect the first 5 converged steps of every OUTCAR under the current dir
 python3 gather_dft_results.py --root_dir "./" -o dataset1.extxyz --first 5
@@ -23,12 +29,27 @@ from pathlib import Path
 
 import numpy as np
 from ase import Atoms
+from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import read, write
 
 LOG = logging.getLogger("gather_dft_results")
 
 DEFAULT_FIRST = 5
 COMPRESSED_SUFFIXES = {".gz", ".bz2", ".xz", ".zip"}
+
+# Calculator results that are stored per atom (one entry per atom) and must be
+# permuted together with the atoms.
+PER_ATOM_RESULTS = frozenset(
+    {
+        "forces",
+        "magmoms",
+        "magmom",
+        "charges",
+        "momenta",
+        "energies",
+        "atomic_energies",
+    }
+)
 
 _FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+(?:[EeDd][-+]?\d+)?")
 
@@ -81,6 +102,95 @@ def is_trainable(atoms: Atoms) -> bool:
     except Exception:
         return False
     return bool(np.isfinite(energy) and np.all(np.isfinite(forces)))
+
+
+def canonical_order(atoms: Atoms) -> np.ndarray:
+    """Indices that put one frame into a canonical element order.
+
+    Atoms are sorted by decreasing atomic number, so heavy elements come first
+    (a metal slab stays in front of its adsorbates).  The sort is stable, i.e.
+    atoms of the same element keep their relative order.
+
+    Sorting by atomic number is deterministic and independent of the order in
+    which the source files are read, so frames with the same composition always
+    end up with the same element sequence.
+    """
+    return np.argsort(-atoms.numbers, kind="stable")
+
+
+def _result_array(atoms: Atoms, name: str) -> np.ndarray | None:
+    """Per-atom calculator result ``name`` of ``atoms``, or None if absent."""
+    if atoms.calc is None:
+        return None
+    value = atoms.calc.results.get(name)
+    if value is None:
+        return None
+    array = np.asarray(value)
+    if array.ndim < 1 or array.shape[0] != len(atoms):
+        return None
+    return array
+
+
+def _check_reordered(before: Atoms, after: Atoms, order: np.ndarray) -> None:
+    """Guard that labels were permuted together with the atoms.
+
+    This is the check whose absence corrupted a previous dataset: positions and
+    symbols were reordered while the forces stayed at their old indices.
+    """
+    symbols = before.get_chemical_symbols()
+    if after.get_chemical_symbols() != [symbols[i] for i in order]:
+        raise RuntimeError("Atom reordering did not permute the chemical symbols.")
+    if not np.array_equal(after.positions, before.positions[order]):
+        raise RuntimeError("Atom reordering did not permute the positions.")
+    for name in sorted(PER_ATOM_RESULTS):
+        values_before = _result_array(before, name)
+        values_after = _result_array(after, name)
+        if values_before is None or values_after is None:
+            continue
+        if not np.array_equal(values_after, values_before[order]):
+            raise RuntimeError(
+                f"Per-atom result {name!r} did not follow its atoms during "
+                "reordering."
+            )
+
+
+def reorder_atoms(atoms: Atoms, order: np.ndarray) -> Atoms:
+    """Return ``atoms`` with all per-atom data permuted by ``order``.
+
+    ``Atoms.__getitem__`` already permutes positions, species, per-atom arrays
+    and constraints, but it drops the calculator.  The calculator is therefore
+    rebuilt as a fresh ``SinglePointCalculator`` with permuted per-atom results
+    (forces, magnetic moments, ...).  The old calculator must not be mutated:
+    ``Atoms.__getitem__`` returns a shallow copy, so mutating the shared
+    calculator would silently change the labels of other frames.
+    """
+    order = np.asarray(order)
+    if np.array_equal(order, np.arange(len(atoms))):
+        return atoms
+
+    reordered = atoms[order]
+    calc = atoms.calc
+    if calc is not None:
+        results = {}
+        for name, value in calc.results.items():
+            array = np.asarray(value)
+            if (
+                name in PER_ATOM_RESULTS
+                and array.ndim >= 1
+                and array.shape[0] == len(atoms)
+            ):
+                results[name] = array[order]
+            else:
+                results[name] = value
+        reordered.calc = SinglePointCalculator(reordered, **results)
+
+    _check_reordered(atoms, reordered, order)
+    return reordered
+
+
+def canonicalize_atoms(atoms: Atoms) -> Atoms:
+    """Reorder one frame into the canonical element order."""
+    return reorder_atoms(atoms, canonical_order(atoms))
 
 
 def _select_steps(
@@ -329,8 +439,12 @@ def main(argv: list[str] | None = None) -> int:
             n_skipped_files += 1
             continue
 
-        for atoms in frames:
+        # Canonicalize before deduplication so that frames of the same
+        # composition are compared atom-by-atom in the same element order and
+        # the written extxyz is consistent for extxyz_to_hdf5.py.
+        for i, atoms in enumerate(frames):
             atoms.set_constraint([])
+            frames[i] = canonicalize_atoms(atoms)
 
         try:
             ediff, dE_list = scan_scf_convergence(outcar)

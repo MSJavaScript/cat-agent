@@ -9,6 +9,7 @@ from .parse_path import parse_path
 from catagent.workflow.models import skill_artifacts_from_skills
 from pathlib import Path
 
+# 这里的路径检测先保持现状。只有当文件或目录存在才拦截，否则会拦截掉一些正常的命令
 
 _SAFE_DEVICE_PATHS = {
     "/dev/null",

@@ -118,13 +118,21 @@ def add_atom_names(data: dict, atom_names: list) -> dict:
     return data
 
 
+# Data entries whose second axis is the atom index (Axis.NATOMS in dpdata).
+# Frame-level arrays such as ``cells`` and ``virials`` must not be permuted by
+# the atom order, even though they are two-dimensional or more.
+PER_ATOM_DATA = frozenset({"coords", "real_atom_types", "forces", "atom_pref"})
+
+
 def sort_atom_types(data: dict) -> dict:
     """Stable-sort atoms by type (dpdata System.sort_atom_types)."""
     idx = np.argsort(data["atom_types"], kind="stable")
     data["atom_types"] = data["atom_types"][idx]
-    for key, _, _ in FRAME_PROPERTIES:
-        if key in data and data[key].ndim >= 2:
-            data[key] = data[key][:, idx]
+    for key in PER_ATOM_DATA:
+        if key in data:
+            array = np.asarray(data[key])
+            if array.ndim >= 2 and array.shape[1] == len(idx):
+                data[key] = array[:, idx]
     return data
 
 

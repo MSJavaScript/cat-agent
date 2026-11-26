@@ -19,9 +19,9 @@ Finetuing is a fast method to get accurate MLFF from a pre-trained model. This s
 
 Build the initial and final states (IS and FS) for each elementary reaction and interpolate between IS and FS to get a rough NEB path (only used to sample structures, as IS and FS are not relaxed yet). Use `scripts/rattle_configs.py` to perturb the atomic postions:
 ```bash
-python3 rattle_configs.py -i POSCAR -o POSCAR_rattle.extxyz -n 4  
+python3 rattle_configs.py -i POSCAR -o POSCAR_rattle.extxyz -n 2  
 ``` 
-This enlarges the configuration space covered by training dataset. We can use a script like below to perturb structures and generate VASP inputs for single point calculations in batch:
+This enlarges the configuration space covered by training dataset. The rattle displacement is larger for light elements and surface adsorbates, which can leave atom pairs too crowded and produce very large forces. Pass `--min_dist_delta D` to push apart any pair closer than the sum of the two covalent radii minus `D` (Å) after rattling; without this option no distance check is performed. `D` must be larger than `r_i + r_j - d_ij` of a normal bond, otherwise real bonds are treated as overlaps (covalent radii overestimate metallic bond lengths, so use a larger `D` for metals); larger `D` is more permissive. Overlaps that cannot be removed this way (for example because the perturbed cell itself is too small) are reported as a warning. We can use a script like below to perturb structures and generate VASP inputs for single point calculations in batch:
 
 ```bash
 i=0
@@ -69,7 +69,7 @@ Then you can submit a batch job including all the `sp_*` dirs and get the initia
 python3 gather_dft_results.py -o results.extxyz
 ```
 
-Only ionic steps whose electronic loop converged (`|dE| < EDIFF`) are kept, and near-duplicate configurations are removed before writing. Use `--first/--last/--random` to select the steps to keep from each OUTCAR (`--first 5` is used when none of them is given), `--seed` to make a random selection reproducible, and `--min_dist`/`--metric` to control deduplication (default: 0.1 Å per-atom RMSD). OUTCARs that cannot be parsed or lack the `EDIFF` line are skipped with a warning; the command exits with a non-zero code when nothing can be collected.
+Only ionic steps whose electronic loop converged (`|dE| < EDIFF`) are kept, and near-duplicate configurations are removed before writing. Use `--first/--last/--random` to select the steps to keep from each OUTCAR (`--first 5` is used when none of them is given), `--seed` to make a random selection reproducible, and `--min_dist`/`--metric` to control deduplication (default: 0.1 Å per-atom RMSD). OUTCARs that cannot be parsed or lack the `EDIFF` line are skipped with a warning; the command exits with a non-zero code when nothing can be collected. The atoms of every written frame are grouped by element (heavy elements first, stable within an element) and positions, forces and other per-atom data are permuted together, so frames of the same composition always share the same element order (required by `extxyz_to_hdf5.py`) and labels stay attached to their atoms.
 
 ### 2. Finetune MLFF
 
@@ -100,9 +100,15 @@ Use `scripts/run_ase_neb_with_dpa.py` to run structure relaxation or NEB with DP
 | opt| POSCAR_<save_name>.result | <save_name>_opt_state.json|<save_name>_opt.traj|
 |neb| <save_name>.result.extxyz | <save_name>_neb_state.json |<save_name>_neb.traj|
 
+Convergence of a relaxation is checked with the largest atomic force. For a NEB, the largest force *perpendicular* to the path is used (the spring force and the climbing-image force along the tangent are projected out; IS and FS are ignored), which is the quantity that must be below `--fmax`.
+
 ```bash
 # run structure relaxation
-python3 run_ase_neb_with_dpa.py \
+# fmax in the range of [0.05, 0.1], nsteps <= 250
+# Because MLFF may not describe the PES correctly, if a tight convergence criterion is used
+# The trajectory may oscillate around the local minimum and never converge.
+# The longer the trajectory, the farther it may deviate from DFT, too large nsteps is meaningless
+python3 run_ase_neb_with_dpa.py --fmax 0.1 --nsteps 150 \
   --pt fronzen.pt2 \
   --save_name opt1 \
   opt --infile POSCAR
@@ -110,7 +116,7 @@ python3 run_ase_neb_with_dpa.py \
 # Add constraint on the bond length between atom 10 and 12. 
 # This option is useful when you want to prevent the decomposition of adsorbates or the auto-binding between fragments. However, this option will cause error when the structure is unreasonable, especially when the bond length between two specific atoms is fixed in a transition state like structure. 
 # Fix bond length are usually safe for IS and FS relaxation.
-python3 run_ase_neb_with_dpa.py \
+python3 run_ase_neb_with_dpa.py --fmax 0.1 --nsteps 150 \
   --pt fronzen.pt2 \
   --save_name opt2 \
   opt --infile POSCAR --bond "10,12"
@@ -123,7 +129,7 @@ python3 run_ase_neb_with_dpa.py \
   opt --infile POSCAR --ads_indices "10,11,12,13"
 
 # Run NEB, providing initial and final states
-python3 run_ase_neb_with_dpa.py \
+python3 run_ase_neb_with_dpa.py --fmax 0.1 --nsteps 150 \
   --pt fronzen.pt2 \
   --save_name neb1 \
   neb --neb_ini POSCAR_ini --neb_fin POSCAR_fin
@@ -192,7 +198,7 @@ python3 check_traj.py --traj opt.traj -o neb_out.extxyz  --neb -n 5
 ```
 use `--nstep_thres` to set the threshold of reasonable steps. Default is 100, for very complex system, we should allow a larger value.
 
-The extracted `extxyz` contains geometry only: energies and forces evaluated by the MLFF are not copied, so the file can be sent to DFT without stale labels. Use `--seed` (default 42) for reproducible sampling, and `--sample uniform` to spread the extracted frames evenly over the trajectory (the last step is always included). For NEB, `-n` is the number of structures extracted from *each* intermediate image, and the number of images is inferred from the repeated initial-state frames; pass `--nimages` explicitly if an image coincides with the initial state. `check_traj.py` exits with code 0 when no structure needs to be extracted and code 1 when the trajectory is broken or unreadable, so batch scripts can tell "converged" from "failed".
+The extracted `extxyz` contains geometry only: energies and forces evaluated by the MLFF are not copied, so the file can be sent to DFT without stale labels. The atoms of every extracted frame are grouped by element (heavy elements first), so concatenating the IS, FS and NEB extractions of one system gives a consistent element order that `extxyz_to_hdf5.py` can convert. Use `--seed` (default 42) for reproducible sampling, and `--sample uniform` to spread the extracted frames evenly over the trajectory (the last step is always included). For NEB, `-n` is the number of structures extracted from *each* intermediate image, and the number of images is inferred from the repeated initial-state frames; pass `--nimages` explicitly if an image coincides with the initial state. `check_traj.py` exits with code 0 when no structure needs to be extracted and code 1 when the trajectory is broken or unreadable, so batch scripts can tell "converged" from "failed".
 
 You can use a bash script like the following to extract structures and prepare VASP inputs in batch.
 
@@ -373,7 +379,7 @@ Below are the related scripts in `scripts` dir. Run these scripts without parame
 | ---- | ---- |
 |check_traj.py| Check the trajectory and extract structures from it if it is problematic. Writes geometry-only extxyz (no MLFF labels) and exits with code 1 on a broken input. |
 |gather_dft_results.py| Collect the converged (`abs(dE) < EDIFF`), deduplicated structures from OUTCARs into an extxyz file|
-|rattle_configs.py|Perturb the structures to enlarge the configuration space |
+|rattle_configs.py|Perturb the structures to enlarge the configuration space; optionally push apart overlapping atoms with `--min_dist_delta`. |
 |run_ase_neb_with_dpa.py| Run structure relaxation (cell is fixed) and NEB with DPA force field|
 |run_ase_npt_md_with_dpa.py|Run structure relaxation (cell can be relaxed ) and NPT MD with DPA MLFF.|
 |sort_elements.py| Sort the elements in a POSCAR.|

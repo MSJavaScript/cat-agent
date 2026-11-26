@@ -18,6 +18,12 @@ considered converged) and 1 when the input is broken or cannot be read.
 
 The written extxyz contains geometry only: energies and forces computed by the
 MLFF are not copied, so the file can be labelled by DFT without stale labels.
+
+The atoms of every extracted frame are put into a canonical element order
+(heavy elements first, atoms of the same element keep their relative order).
+This keeps concatenated extxyz files - e.g. the IS, FS and NEB extractions of
+one system - compatible with ``extxyz_to_hdf5.py``, which cannot merge frames
+that list their atoms in different orders.
 """
 
 from __future__ import annotations
@@ -110,25 +116,60 @@ def choose_indices(
     return sorted(rng.sample(range(n), k))
 
 
+def canonical_order(atoms: Atoms) -> np.ndarray:
+    """Indices that put one frame into a canonical element order.
+
+    Atoms are sorted by decreasing atomic number (heavy elements first), with a
+    stable sort so atoms of the same element keep their relative order.  This
+    is independent of the source order, hence frames with the same composition
+    always get the same element sequence.
+    """
+    return np.argsort(-atoms.numbers, kind="stable")
+
+
+def canonicalize_atoms(atoms: Atoms) -> Atoms:
+    """Return a reordered copy of ``atoms`` with a canonical element order.
+
+    Positions, species, per-atom arrays and constraints are permuted together
+    by ``Atoms.__getitem__``.  The calculator is dropped: trajectories are
+    written for DFT labelling, so MLFF energies/forces must not be kept.
+    """
+    order = canonical_order(atoms)
+    if np.array_equal(order, np.arange(len(atoms))):
+        return atoms
+
+    reordered = atoms[order]
+    symbols = atoms.get_chemical_symbols()
+    if reordered.get_chemical_symbols() != [symbols[i] for i in order]:
+        raise RuntimeError("Atom reordering did not permute the chemical symbols.")
+    if not np.array_equal(reordered.positions, atoms.positions[order]):
+        raise RuntimeError("Atom reordering did not permute the positions.")
+    return reordered
+
+
 def clean_structure(
     atoms: Atoms, source: str, image: int | None = None, step: int | None = None
-) -> None:
-    """Drop MLFF results and attach provenance metadata.
+) -> Atoms:
+    """Drop MLFF results, reorder the atoms and attach provenance metadata.
 
     The structure is written for DFT labelling, so the energy and forces of the
     MLFF are removed. The MLFF energy is kept as ``mlff_energy`` for reference.
     """
+    energy = None
     if atoms.calc is not None:
         energy = atoms.calc.results.get("energy")
-        if energy is not None and np.isfinite(energy):
-            atoms.info["mlff_energy"] = float(energy)
+
+    atoms = canonicalize_atoms(atoms)
     atoms.calc = None
 
+    if energy is not None and np.isfinite(energy):
+        atoms.info["mlff_energy"] = float(energy)
     atoms.info["source"] = str(source)
     if image is not None:
         atoms.info["image"] = int(image)
     if step is not None:
         atoms.info["step"] = int(step)
+    return atoms
 
 
 def extract_opt(
@@ -149,9 +190,7 @@ def extract_opt(
 
     result: list[Atoms] = []
     for step in choose_indices(nstruct, k, rng, args.sample):
-        atoms = frames[step]
-        clean_structure(atoms, args.traj, step=step)
-        result.append(atoms)
+        result.append(clean_structure(frames[step], args.traj, step=step))
     return result
 
 
@@ -213,9 +252,9 @@ def extract_neb(
     for image in range(1, nimages - 1):
         sub_traj = frames[image:nstruct:nimages]
         for step in choose_indices(len(sub_traj), k, rng, args.sample):
-            atoms = sub_traj[step]
-            clean_structure(atoms, args.traj, image=image, step=step)
-            result.append(atoms)
+            result.append(
+                clean_structure(sub_traj[step], args.traj, image=image, step=step)
+            )
     return result
 
 

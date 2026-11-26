@@ -4,6 +4,7 @@ Usage:
 
 # run structure relaxation
 python3 run_ase_neb_with_dpa.py \
+  --fmax 0.1 --nsteps 50 \
   --pt fronzen.pt2 \
   --save_name opt1 \
   opt --infile POSCAR
@@ -39,15 +40,17 @@ from ase.optimize import FIRE, LBFGS
 from ase.mep import NEB
 from ase.neighborlist import NeighborList, natural_cutoffs
 from ase.constraints import FixBondLength
+from ase.geometry import find_mic
+from ase import Atoms
 
 from subprocess import check_call
 from deepmd.calculator import DP as DPCalculator
 import argparse, json
 import numpy as np
 
-def run_opt(atoms, 
-            pt_file, 
-            save_name, 
+def run_opt(atoms:Atoms, 
+            pt_file:str, 
+            save_name:str, 
             fmax=0.08, 
             nsteps=300,
             atom_pair:tuple=None,
@@ -74,7 +77,7 @@ def run_opt(atoms,
     try:
         opt = LBFGS(atoms, logfile=f"{save_name}_opt.log", trajectory=f"{save_name}_opt.traj")
         opt.run(fmax=fmax, steps=nsteps)
-        if not opt.converged():
+        if np.max(np.abs(atoms.get_forces())) > fmax:
             result = {"state": "error", "message": f"Cannot converge after {nsteps} steps."}
     except Exception as e:
         if atom_pair:
@@ -103,7 +106,72 @@ def run_opt(atoms,
     write(f"POSCAR_{save_name}.result", atoms, format="vasp")
     
     check_call(f"rm -f {save_name}_opt.log", shell=True)
-    
+
+
+def _get_fmax_neb(images)->float:
+    """Largest force perpendicular to the NEB path, in eV/A.
+
+    For a relaxation the convergence criterion is simply the largest force on
+    any atom.  For an NEB this cannot be used directly: the spring force (and,
+    for the climbing image, the force driving the image up the barrier) acts
+    *along* the path, so a converged path can still have large tangential
+    forces.  Only the force component perpendicular to the local tangent is
+    relevant, i.e.
+
+        F_perp = F - (F . t) t
+
+    with ``t`` the normalized path tangent.  The tangent is the ASE
+    "improved tangent" (Henkelman & Jonsson, J. Chem. Phys. 113, 9978, Eqs.
+    8-11), computed from the image energies and minimum-image displacements in
+    the same way as ``ase.mep.neb.ImprovedTangentMethod``.
+
+    The IS and FS are fixed during a NEB and are ignored.  ``images`` may be a
+    list of ``ase.Atoms`` taken from an NEB trajectory, so the helper works on
+    both a live ``NEB`` object (``neb.images``) and a saved trajectory.
+    """
+    nimages = len(images)
+    if nimages < 3:
+        return 0.0
+
+    energies = np.array([image.get_potential_energy() for image in images])
+
+    # Vectors between consecutive images, as in ase.mep.neb.Spring.
+    springs = []
+    for i in range(nimages - 1):
+        delta = images[i + 1].get_positions() - images[i].get_positions()
+        delta = find_mic(delta, images[i].cell, images[i].pbc)[0]
+        springs.append(delta.ravel())
+
+    fmax_value = 0.0
+    for i in range(1, nimages - 1):
+        d_prev = springs[i - 1]
+        d_next = springs[i]
+        e_prev, e_cur, e_next = energies[i - 1], energies[i], energies[i + 1]
+
+        if e_next > e_cur > e_prev:
+            tangent = d_next
+        elif e_next < e_cur < e_prev:
+            tangent = d_prev
+        else:
+            dvmax = max(abs(e_next - e_cur), abs(e_prev - e_cur))
+            dvmin = min(abs(e_next - e_cur), abs(e_prev - e_cur))
+            if e_next > e_prev:
+                tangent = d_next * dvmax + d_prev * dvmin
+            else:
+                tangent = d_next * dvmin + d_prev * dvmax
+
+        norm = np.linalg.norm(tangent)
+        if norm > 0:
+            tangent = tangent / norm
+        else:
+            tangent = np.zeros_like(tangent)
+
+        forces = images[i].get_forces().ravel()
+        forces_perp = forces - np.vdot(forces, tangent) * tangent
+        atom_fmax = np.linalg.norm(forces_perp.reshape(-1, 3), axis=1).max()
+        fmax_value = max(fmax_value, atom_fmax)
+    return float(fmax_value)
+
 def get_structures_distance(atoms1, atoms2)->float:
     if len(atoms1)!= len(atoms2):
         return -1.0
@@ -156,10 +224,21 @@ def run_neb(pt_file,
                 trajectory=f"{save_name}_neb.traj")
     opt2.run(fmax=fmax, steps=nsteps)
 
-    if not opt2.converged():
-        result = {"state": "error", "message": f"Cannot converge after {nsteps} steps."}
+    # opt.converged() uses the NEB force including the spring (and climbing)
+    # force along the path, which can stay above fmax on a converged path.
+    # Judge convergence by the force perpendicular to the path instead.
+    fmax_neb = _get_fmax_neb(neb2.images)
+    if fmax_neb > fmax:
+        result = {
+            "state": "error",
+            "message": f"Cannot converge after {nsteps} steps "
+                       f"(max perpendicular force {fmax_neb:.3f} eV/A > {fmax} eV/A).",
+        }
     else:
-        result = {"state": "success", "message": "Converged."}
+        result = {
+            "state": "success",
+            "message": f"Converged (max perpendicular force {fmax_neb:.3f} eV/A).",
+        }
 
     with open(f"{save_name}_neb_state.json", mode='w') as f:
             json.dump(result, f)
@@ -184,7 +263,7 @@ parser.add_argument("--save_name",
                     help="Prefix of the *.traj and *.json file names.")
 
 parser.add_argument("--fmax", type=float, default=0.08, help="Force convergence criterion (eV/A). Default 0.08. ")
-parser.add_argument("--nsteps", type=int, default=350, help="Max relaxation or NEB steps. Default 350.")
+parser.add_argument("--nsteps", type=int, default=150, help="Max relaxation or NEB steps. Default 150.")
 
 subparsers = parser.add_subparsers(dest='task', help='Task type, run structure relaxation or NEB.')
 
@@ -193,21 +272,26 @@ opt_parser.add_argument("--infile",
                         type=str,
                         help="Path to the input POSCAR file which requires structure relaxation.")
 opt_parser.add_argument("--bond", 
+                        required=False,
                         type=str,
                         help="Two integers separated by comma, FixBondLength constraint will be applied to these two atoms.")
 opt_parser.add_argument("--ads_indices", 
+                        required=False,
                         type=str,
                         help="Indices of adsorbate atoms, a list of integers separated by comma.")
 
 neb_parser = subparsers.add_parser('neb', help='NEB task.')
 neb_parser.add_argument("--neb_ini",
                     type=str,
+                    required=False,
                     help="Path to initial state.")
 neb_parser.add_argument("--neb_fin",
                     type=str,
+                    required=False,
                     help="Path to final state.")
 neb_parser.add_argument("--neb_path",
                     type=str,
+                    required=False,
                     help="Path to an extxyz file which contains an initial NEB path.")
 
 args = parser.parse_args()

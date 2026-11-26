@@ -1,6 +1,6 @@
 # Job submission skill(Only for StepNode)
 
-The details of job submission such as resource allocation and grouping of batch jobs are hidden from the current agent (StepNode). You only need to do 3 tasks: (1) Ensure the integrity of input files within each computation directory. (2) Select appropriate computational platform provider and job environment. (3) Provide a template script `run.sh` for job submission and a json file containing the metadata of the job.
+The details of job submission such as resource allocation and grouping of batch jobs are hidden from the current agent (StepNode). You only need to do 3 tasks: (1) Ensure the integrity of input files within each computation directory. (2) Select appropriate computational platform provider and job environment. (3) Provide a template script `run.sh` for job submission and a json file `job_description.json` containing the metadata of the job. To keep the workdir clean, make a separate dir for job submission. Move `run.sh`, `job_description.json` and all the files related job to it, then submit job in this dir.
 
 ## 1. The integrity of input files
 
