@@ -1,5 +1,5 @@
 """
-Interpolate between initial state and final state, generate the initial NEB path. NOTE: The atomic indices in IS and FS must be matched.
+Interpolate between initial state and final state, generate the initial NEB path. NOTE: The atomic indices in IS and FS must be matched. For production run, both IS and FS should be relaxed, unless you just want to sample structures by neb interpolation.
 
 Usage:
 python3 neb_make.py --ini POSCAR_ini --fin POSCAR_fin --spacing 0.5 

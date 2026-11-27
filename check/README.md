@@ -16,6 +16,7 @@ The tests are grouped by what they exercise:
 | `test_agent_state_sync.py` | no | no | Outer↔orchestrator step sync: no lost updates, no stale preparation requests. |
 | `test_agent_liveness.py` | no | no | StepNode run registry, crash/cancel/dead-run reporting, and the request queue's waits. |
 | `test_agent_concurrency.py` | no | no | Per-thread run serialization, stale job-callback rejection, deterministic `job_uuid`, and the synchronous `202` JobResult ACK. |
+| `test_agent_multi_interrupt.py` | no | no | Sibling interrupts of one StepNode/orchestrator are merged and resumed once; answers may arrive in separate invocations, and different steps are not merged. |
 | `test_jobmanager_recovery.py` | no | embedded | Crash recovery: resumable submission/finalization, callback outbox, local exit codes, per-thread locks. |
 | `test_cli_jobs.py` | no | mocked HTTP | The debug CLI polls `/status/{job_uuid}` and resumes a JobSubmission itself. |
 | `test_app_skill_init.py` | no | no | Skill-index loading/remapping, graph `loaded_skills` seeding, 100-character skill-tool payloads, CLI parser options, and agent logging. |
@@ -150,6 +151,7 @@ python -m check.test_planner_tool
 python -m check.test_register_raw_plan
 python -m check.test_agent_stepnode
 python -m check.test_agent_state_sync
+python -m check.test_agent_multi_interrupt
 python -m check.test_jobmanager_recovery
 python -m check.test_cli_jobs
 python -m check.test_app_skill_init

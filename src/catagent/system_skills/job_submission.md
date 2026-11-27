@@ -111,7 +111,7 @@ You should always generate a `job_description.json` which contains the metadata 
 - description: Short description of the job. 
 - job_name: The job name. For a batch job, this is taken as a prefix. 
 - use_gpu: If the job requires GPU.
-- batch_job: If this is a batch job.
+- batch_job: If this is a batch job. If true, job manager will divide these jobs into several groups and submit them at the same time.
 - n_jobs: The total number of jobs. Equals to 1 if `batch_job` is `false`.
 - workload: Estimation of the average workload for each job. Possible values are "mini", "low", "medium", "high", "ultra high". 
 - placeholders: A dict containing all the placeholders in `run.sh` that must be replaced. Key is the placeholder, value is its meaning.
@@ -145,7 +145,7 @@ All the details of job submission are blind to the current agent. If you need to
 This also applies to the adjustment of calculation parameters. For example, there is a batch of TiO2 r2SCAN single point DFT. You can just submit a single job and check the result, adjust INCAR until this calculation converges. Then you can safely submit a batch of jobs.  
  
 ## Conception: Single job vs Batch job
-A single job has ONLY one calculation workdir, while a batch job consists of multiple calculation workdirs, each of them or subdirs inside them is a complete job. For both cases, there should be ONLY one `run.sh` and `job_description.json`, that is, the batch jobs share the common `run.sh` and `job_description.json`. 
+A single job has ONLY one calculation workdir, while a batch job consists of multiple calculation workdirs, each of them or subdirs inside them is a complete job (job manager will automatically divide them into several groups). For both cases, there should be ONLY one `run.sh` and `job_description.json`, that is, the batch jobs share the common `run.sh` and `job_description.json`. 
 
 For example, there are 100 VASP jobs, then you should put only one `run.sh` and `job_description.json` in the workdir of current step. In run.sh, you write as [Example 1: Many NEB jobs](#example-1-many-neb-jobs). And in `job_description.json`, set `batch_job = true`. After you submit it, JobManager will divide them into groups automatically.
 

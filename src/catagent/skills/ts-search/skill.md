@@ -9,6 +9,7 @@ metadata:
     - vasp
     - transition state search 
     - machine-learning-potential
+    - structure building
 ---
 
 # Transition state search skill
@@ -32,7 +33,7 @@ VASP has NEB and Dimer function by itself, but this skill may be not compatible 
 Follow the steps below to run a NEB calculation:
 
 1. Build IS and FS, their atomic indices should be matched (use `build_ini_fin_structures_on_surface` tool, atomic indices are automatically matched, see "stepnode-tools" skill).
-2. Perform structure relaxation on IS and FS.
+2. Perform structure relaxation on IS and FS. This is important, unless you just want to sample structures for MLFF training.
 3. Use `script/neb_make.py` to interpolate between relaxed IS and FS and get an initial guess of NEB path (you can also use `build_nebpath_on_surface` tool, see "stepnode-tools" skill).
     ```python
     python3 neb_make.py --ini POSCAR_ini --fin POSCAR_fin --nimages 5 # or --spacing 0.5
@@ -71,8 +72,6 @@ Follow the steps below to run a NEB calculation:
     ```
     `run_ase_neb_with_dpa.py` in cat-mlff skill is a convenient script which runs neb by DPA force field. See the cat-mlff skill for more details.
 
-**PITFALLS**: The atomic indices in IS and FS must be matched, or the atoms will crowd together when make NEB interpolation. `build_ini_fin_structures_on_surface` tool in "structure_building_tools" collection and `bind_to_surface` tool in "reaction_system_tools" collection of StepNode can automatically match the indices, see "stepnode-tools" skill.
-
 ## Parameter setting of NEB
 
 NEB is usually difficult to converge, it's important to select a good optimization algorithm.
@@ -82,7 +81,8 @@ NEB is usually difficult to converge, it's important to select a good optimizati
 The tags below should always be set in INCAR for NEB calculation:
 ```
 ICHAIN = 0
-IMAGES = #The number of intermediate images
+#The number of intermediate images, should be determined from the distance between relaxed IS and FS
+IMAGES = N
 SPRING = -5
 LCLIMB = .TRUE.
 ```
@@ -152,6 +152,13 @@ If the distance between IS and FS is large, but due to computational cost, you c
 ### Select new IS and FS, Re-interpolation
 
 For complex systems, due to the presence of many local minima, the NEB path is prone to distortion during the optimization process, making it impossible for the force to decrease. In this case, find the image with the highest energy on the NEB path (set as i), and use i-1 and i+1 as the new IS and FS for interpolation, even if i-1 and i+1 are not at energy minima. By re-interpolation, the spacing between images will be much smaller and NEB converges more easily.
+
+### How to handle IS and FS drift.
+After relaxation, adsorbate may drift away from their initial position, this will result in a large IS-FS distance and usually make NEB difficult to converge. There are two main reasons for position drift: the interaction of periodic images and the complex surface morphology. For example, if you calculate NEB of "CH + O <-> CHO" on a 2×2 surface, CH* or O* may be attracted by their periodic images. This makes the distance between CH* and O* in the same cell is larger than the distance of between CH*(O*) and O*(CH*) in a periodic image. The IS-FS distance is significantly larger in this cases, and NEB is hard to converge due to periodic images interaction. Another example is Fe(211), a rugged and uneven surface, you cannot predict the stable adsorption site in advance. The distance between IS and FS on this surface is usually large, because you cannot easily control them by adjusting the initial position of adsorbates. To handle these problems, we suggest to use a large surface (at least 3×3) to avoid interaction and make dense NEB interpolation (the distance between NEB images is at least 0.5). We also usually need to manually adjust the structure to build NEB path. For example, manually move the co-adsorbed adsorbates closer to each other on the surface and generate several NEB images in this process. When the distance between IS and FS are sufficiently small (e.g.), when can use linear NEB interpolation to generate the remaining NEB images.
+
+**TIPS: How to move atoms programmatically.** It's difficult to adjust atom positions without viewing the 3D structure. In this case, we can use a virtual potential function combined with structure relaxation to do this job. If you want to move two atom groups closer, you can add a LJ potential between them. For unrelated atoms (e.g. surface atoms), fix their positions and add a hard wall potential between them and moving atoms, to prevent the moving atoms from falling in to them. "references/code-snippet.txt" contains some example code snippets maybe useful.
+
+
 
 ## Dimer (for VASP only)
 
@@ -225,3 +232,4 @@ Below are the related scripts in `scripts` dir. Run these scripts without parame
 | Name | Purpose|
 | ---- | ---- |
 |job_submission.md| File template for job submission, only for StepNode |
+|code-snippet.txt|Example code snippets about programmatically adjust the structures|

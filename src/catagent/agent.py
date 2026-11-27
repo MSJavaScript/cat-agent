@@ -198,6 +198,124 @@ def node_set_flag(state:WorkflowState, config:RunnableConfig):
     return Command(goto="router", update={ "orchestrator_is_working": False,
                                           "orchestrator_requests":outdated_requests })
 
+
+def _resume_group(state:InterruptNodeInput, response:Any) -> tuple[str, Dict[str, Any]]:
+    """Build one collector group from an answered outer interrupt."""
+    if state.get("source") == "orchestrator":
+        return "orchestrator", {
+            "source": "orchestrator",
+            "step_id": "",
+            "workdir": "",
+            "project_workdir": state.get("project_workdir", ""),
+            "steps": state.get("steps") or {},
+            "answers": {state["interrupt_ori_id"]: response},
+        }
+    step_id = state.get("step_id", "")
+    return f"stepnode:{step_id}", {
+        "source": "stepnode",
+        "step_id": step_id,
+        "workdir": state.get("workdir", ""),
+        "project_workdir": state.get("project_workdir", ""),
+        "steps": {},
+        "answers": {state["interrupt_ori_id"]: response},
+    }
+
+
+def resume_collector_node(state:WorkflowState, config:RunnableConfig):
+    """Resume each paused inner graph exactly once, with all its answers.
+
+    A StepNode (or the orchestrator) may have several pending inner interrupts
+    at the same time.  The outer graph surfaces one ``interrupt_node`` per
+    interrupt, and when their answers arrive in the same outer superstep each
+    node only records its own answer here.  This collector then dispatches a
+    single ``step_node``/``orchestrator_node`` Send per group with the merged
+    ``{inner_interrupt_id: response}`` map.
+
+    Resuming the inner graph once per answer would start two concurrent runs on
+    the same inner checkpoint.  Each one sees the other interrupt still
+    pending, re-interrupts it, and no new checkpoint is written; the step then
+    waits forever for results that were already delivered.  See
+    ``learn/multi_interrupt_demo``.
+    """
+    groups = state.get("pending_resumes") or {}
+    sends = []
+    cleared = {}
+    for group_key, group in groups.items():
+        answers = group.get("answers") or {}
+        if not answers:
+            continue
+        if group.get("source") == "orchestrator":
+            sends.append(Send("orchestrator_node", arg={
+                "interrupt_resume": dict(answers),
+                "project_workdir": group.get("project_workdir", ""),
+                # Keep the dispatch-time baseline so the resumed turn can
+                # propagate step deletions as a delta.
+                "steps": group.get("steps") or {},
+            }))
+        else:
+            step_id = group.get("step_id", "")
+            mark_step_scheduled(config["configurable"]["thread_id"], step_id)
+            sends.append(Send("step_node", arg={
+                "step_id": step_id,
+                "workdir": group.get("workdir", ""),
+                "project_workdir": group.get("project_workdir", ""),
+                "interrupt_resume": dict(answers),
+            }))
+        cleared[group_key] = None
+
+    if not sends:
+        return Command(goto=END)
+    return Command(goto=sends, update={"pending_resumes": cleared})
+
+
+def interrupt_node(state:InterruptNodeInput, config:RunnableConfig):
+    # NOTE: the two log lines below appear twice for one interrupt.
+    # LangGraph re-executes a node from the top when its ``interrupt()`` is
+    # answered: the first pass suspends, the second pass calls this function
+    # again and prints the same "Enter interrupt_node" / "JobSubmission
+    # interrupt" lines before ``interrupt()`` returns the answer.  The
+    # second occurrence is a resume, not a second job submission.
+    logger.info(f"Enter interrupt_node. source = {state['source']}, step_id = {state['step_id']}.")
+    thread_id = config["configurable"]["thread_id"]
+    if state['interrupt_payload']["kind"] == "JobSubmission":
+        logger.info(f"JobSubmission interrupt. step_id = {state['step_id']}.")
+
+    # A paused step is *not* dead.  Mark it before suspending so the request
+    # queue does not mistake `status == "running"` with no StepNode task for
+    # a crash (this matters when a sibling step finishes while this one is
+    # waiting for the user).  The mark survives the GraphInterrupt; it is
+    # replaced by `scheduled` when the collector dispatches the resume.
+    if state["source"] == "stepnode":
+        mark_step_paused(thread_id, state.get("step_id", ""))
+
+    # 该节点把内层agent发送的interrupt二次发送到外部
+    # Attach the producing source to the value for the debug UI.  The
+    # payload converter removes this private key before display, and the
+    # resume response is unaffected because it never reads the value back.
+    value = state["interrupt_payload"]
+    if isinstance(value, dict):
+        if state.get("source") == "stepnode":
+            debug_source = f"{thread_id}:{state.get('step_id', '')}"
+        elif state.get("source") == "orchestrator":
+            debug_source = thread_id
+        else:
+            debug_source = None
+        value = {**value, "_debug_source": debug_source}
+    try:
+        response = interrupt(value=value)
+    except GraphBubbleUp:
+        # Still suspended: keep the `paused` mark for the next superstep.
+        raise
+
+    # Do not resume the inner graph here: sibling interrupts of the same
+    # StepNode/orchestrator are answered in the same outer superstep.  Resume
+    # exactly once, with every answer, or two concurrent runs would start from
+    # one inner checkpoint and re-interrupt each other forever.
+    group_key, group = _resume_group(state, response)
+    return Command(goto="resume_collector",
+                   update={"pending_resumes": {group_key: group}})
+
+
 def create_catagent(model:BaseChatModel, 
                     job_manager_url:str,
                     http_client:httpx.AsyncClient,
@@ -585,64 +703,6 @@ def create_catagent(model:BaseChatModel,
                                "finalization": lastest_state.values.get("finalization", False)
                            })
 
-    def interrupt_node(state:InterruptNodeInput, config:RunnableConfig):
-        # NOTE: the two log lines below appear twice for one interrupt.
-        # LangGraph re-executes a node from the top when its ``interrupt()`` is
-        # answered: the first pass suspends, the second pass calls this function
-        # again and prints the same "Enter interrupt_node" / "JobSubmission
-        # interrupt" lines before ``interrupt()`` returns the answer.  The
-        # second occurrence is a resume, not a second job submission.
-        logger.info(f"Enter interrupt_node. source = {state['source']}, step_id = {state['step_id']}.")
-        thread_id = config["configurable"]["thread_id"]
-        if state['interrupt_payload']["kind"] == "JobSubmission":
-            logger.info(f"JobSubmission interrupt. step_id = {state['step_id']}.")
-
-        # A paused step is *not* dead.  Mark it before suspending so the request
-        # queue does not mistake `status == "running"` with no StepNode task for
-        # a crash (this matters when a sibling step finishes while this one is
-        # waiting for the user).  The mark survives the GraphInterrupt; it is
-        # replaced by `scheduled` when the node runs again after the resume.
-        if state["source"] == "stepnode":
-            mark_step_paused(thread_id, state.get("step_id", ""))
-
-        # 该节点把内层agent发送的interrupt二次发送到外部
-        # Attach the producing source to the value for the debug UI.  The
-        # payload converter removes this private key before display, and the
-        # resume response is unaffected because it never reads the value back.
-        value = state["interrupt_payload"]
-        if isinstance(value, dict):
-            if state.get("source") == "stepnode":
-                debug_source = f"{thread_id}:{state.get('step_id', '')}"
-            elif state.get("source") == "orchestrator":
-                debug_source = thread_id
-            else:
-                debug_source = None
-            value = {**value, "_debug_source": debug_source}
-        try:
-            response = interrupt(value=value)
-        except GraphBubbleUp:
-            # Still suspended: keep the `paused` mark for the next superstep.
-            raise
-        # The outer interrupt id is not the id used by the inner graph.  Keep
-        # the original id so the answer can be routed back to the exact inner
-        # interrupt when several interrupts are pending at the same time.
-        resume_map = {state["interrupt_ori_id"]: response}
-        if state["source"] == "orchestrator":
-            return Command(goto=Send("orchestrator_node",
-                                     arg={"interrupt_resume": resume_map,
-                                          "project_workdir": state.get("project_workdir", ""),
-                                          # Keep the dispatch-time baseline so
-                                          # the delta can propagate deletions.
-                                          "steps": state.get("steps") or {}}))
-        else:
-            # 这里不需要设置workdir，直接resume，原来的workdir不会被覆盖
-            mark_step_scheduled(thread_id, state.get("step_id", ""))
-            return Command(goto=Send("step_node",
-                                     arg={"step_id": state["step_id"],
-                                          "workdir": state.get("workdir", ""),
-                                          "project_workdir": state.get("project_workdir", ""),
-                                          "interrupt_resume": resume_map}))
-
     async def orchestrator_request_queue_node(state:WorkflowState,
                                                config:RunnableConfig):
         logger.info("orchestrator_request_queue_node")
@@ -691,6 +751,7 @@ def create_catagent(model:BaseChatModel,
     graph.add_node("orchestrator_request_queue", orchestrator_request_queue_node)
     graph.add_node("router", router)
     graph.add_node("interrupt_node", interrupt_node)
+    graph.add_node("resume_collector", resume_collector_node)
     # 每个节点里都有Command(goto=...)所以只需要设置入口点，不需要添加边
     graph.add_edge(START, "init_skills")
     graph = graph.compile(checkpointer=checkpointer)

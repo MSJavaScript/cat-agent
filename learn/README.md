@@ -8,6 +8,7 @@ and executed.
 | --- | --- |
 | [`event_log_demo/`](event_log_demo/) | why `catagent/app/events.py` exists: server-side event recording, polling with sequence cursors, out-of-band jobmanager callbacks, restart detection |
 | [`job_resume_demo/`](job_resume_demo/) | replacing the jobmanager → agent HTTP callback with an in-process callback or event bus: what gets simpler, what must stay durable |
+| [`multi_interrupt_demo/`](multi_interrupt_demo/) | several pending interrupts on one graph: one `ainvoke()` returns all of them, a partial resume keeps the sibling pending, and why the outer graph must merge all answers before resuming the inner StepNode/orchestrator once |
 
 ```bash
 cd learn/event_log_demo

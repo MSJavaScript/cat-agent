@@ -175,6 +175,46 @@ def dict_reducer(current:dict, update:dict) -> dict:
     return result
 
 
+def pending_resume_reducer(
+    current: Optional[Dict[str, Dict[str, Any]]],
+    update: Optional[Dict[str, Optional[Dict[str, Any]]]],
+) -> Dict[str, Dict[str, Any]]:
+    """Merge the interrupts answered in one outer superstep, per group.
+
+    A group is one paused inner graph: a StepNode (``stepnode:<step_id>``) or
+    the orchestrator (``orchestrator``).  When that graph has several pending
+    interrupts, the outer graph surfaces one ``interrupt_node`` per interrupt
+    and they can all be answered in the same superstep.  Resuming the inner
+    graph once per answer races two runs on the same checkpoint, so the
+    answers are accumulated here and a single collector resumes the group
+    with the full ``answers`` map.  ``None`` removes a group after dispatch.
+    """
+    result: Dict[str, Dict[str, Any]] = {
+        key: dict(value) for key, value in (current or {}).items()
+    }
+    for key, value in (update or {}).items():
+        if value is None:
+            result.pop(key, None)
+            continue
+        if not isinstance(value, dict):
+            continue
+        existing = result.get(key)
+        if existing is None:
+            merged = dict(value)
+            merged["answers"] = dict(value.get("answers") or {})
+            result[key] = merged
+            continue
+        # Metadata such as workdir/steps is identical for every sibling;
+        # the answers are the only field that must be unioned.
+        merged = dict(existing)
+        merged.update({k: v for k, v in value.items() if k != "answers"})
+        answers = dict(existing.get("answers") or {})
+        answers.update(value.get("answers") or {})
+        merged["answers"] = answers
+        result[key] = merged
+    return result
+
+
 class WorkflowContext(TypedDict, total=False):
     """Context shared by the outer workflow and its inner agents."""
 
@@ -204,6 +244,15 @@ class WorkflowState(TypedDict, total=False):
 
     steps: Annotated[Dict[str, Step], dict_reducer] # 唯一与orchestrator共享的字段
     step_results: Annotated[Dict[str, StepResult], dict_reducer]
+
+    # Answers collected from sibling outer interrupt_node tasks, keyed by
+    # "stepnode:<step_id>" or "orchestrator".  ``resume_collector_node``
+    # merges them and resumes each paused inner graph exactly once with the
+    # complete ``{inner_interrupt_id: response}`` map.
+    pending_resumes: Annotated[
+        Dict[str, Dict[str, Any]], pending_resume_reducer
+    ]
+
     # Skills loaded by the orchestrator. StepNode receives a copy so it can
     # call get_skill_content() without loading the skill again.
     loaded_skills: Annotated[Dict[str, SkillMetadata], dict_reducer]
